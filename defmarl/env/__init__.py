@@ -7,6 +7,7 @@ from .mpe_line import MPELine
 from .mpe_formation import MPEFormation
 from .mpe_corridor import MPECorridor
 from .mpe_connect_spread import MPEConnectSpread
+from .mve_dist_measure_target import MVEDistMeasureTarget
 
 
 ENV = {
@@ -16,6 +17,7 @@ ENV = {
     'MPEFormation': MPEFormation,
     'MPECorridor': MPECorridor,
     'MPEConnectSpread': MPEConnectSpread,
+    'MVEDistMTarget': MVEDistMeasureTarget,
 }
 
 
@@ -35,15 +37,14 @@ def make_env(
     params = ENV[env_id].PARAMS
     max_step = DEFAULT_MAX_STEP if max_step is None else max_step
     if num_obs is not None:
-        params['n_obs'] = num_obs
+        params['n_obsts'] = num_obs
     if full_observation:
-        area_size = params['default_area_size'] if area_size is None else area_size
+        area_size = params['default_state_range'] if area_size is None else area_size
         params['comm_radius'] = area_size * 10
     return ENV[env_id](
         num_agents=num_agents,
         area_size=area_size,
         max_step=max_step,
         max_travel=max_travel,
-        dt=0.03,
         params=params
     )

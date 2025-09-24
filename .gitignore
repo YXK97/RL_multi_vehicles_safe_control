@@ -5,3 +5,4 @@ wandb
 logs
 figs
 *.egg-info
+README.md

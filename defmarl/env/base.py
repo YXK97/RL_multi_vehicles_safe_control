@@ -34,8 +34,8 @@ class MultiAgentEnv(ABC):
     def __init__(
             self,
             num_agents: int,
-            area_size: float,
-            max_step: int = 256,
+            area_size: float | Array,
+            max_step: int = 128,
             max_travel: Optional[float] = None,
             dt: float = 0.03,
             params: Optional[dict] = None
@@ -64,7 +64,7 @@ class MultiAgentEnv(ABC):
         return self._max_travel
 
     @property
-    def area_size(self) -> float:
+    def area_size(self) -> float | Array:
         return self._area_size
 
     @property

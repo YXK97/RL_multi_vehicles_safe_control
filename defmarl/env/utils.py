@@ -46,27 +46,27 @@ def inside_obstacles(points: Pos, obstacles: Obstacle = None, r: Radius = 0.) ->
 
 def get_node_goal_rng(
         key: PRNGKey,
-        side_length: float,
+        side_length: float | Array,
         dim: int,
         n: int,
         min_dist: float,
         obstacles: Obstacle = None,
         side_length_y: float = None,
         max_travel: float = None
-) -> [Pos, Pos]:
+) -> Tuple[Pos, Pos]:
     max_iter = 1024  # maximum number of iterations to find a valid initial state/goal
     states = jnp.zeros((n, dim))
     goals = jnp.zeros((n, dim))
     side_length_y = side_length if side_length_y is None else side_length_y
 
-    def get_node(reset_input: Tuple[int, Array, Array, Array]):  # key, node, all nodes
+    def get_node(reset_input: Tuple[int, Array, Array, Array]):  # i_iter, key, node, all nodes
         i_iter, this_key, _, all_nodes = reset_input
         use_key, this_key = jr.split(this_key, 2)
         i_iter += 1
         return i_iter, this_key, jr.uniform(use_key, (dim,),
                                             minval=0, maxval=jnp.array([side_length, side_length_y])), all_nodes
 
-    def non_valid_node(reset_input: Tuple[int, Array, Array, Array]):  # key, node, all nodes
+    def non_valid_node(reset_input: Tuple[int, Array, Array, Array]):  # i_iter, key, node, all nodes
         i_iter, _, node, all_nodes = reset_input
         dist_min = jnp.linalg.norm(all_nodes - node, axis=1).min()
         collide = dist_min <= min_dist
@@ -75,7 +75,7 @@ def get_node_goal_rng(
         return ~valid
 
     def get_goal(reset_input: Tuple[int, Array, Array, Array, Array]):
-        # key, goal_candidate, agent_start_pos, all_goals
+        # i_iter, key, goal_candidate, agent_start_pos, all_goals
         i_iter, this_key, _, agent, all_goals = reset_input
         use_key, this_key = jr.split(this_key, 2)
         i_iter += 1
@@ -88,7 +88,7 @@ def get_node_goal_rng(
                 use_key, (dim,), minval=-max_travel, maxval=max_travel) + agent, agent, all_goals
 
     def non_valid_goal(reset_input: Tuple[int, Array, Array, Array, Array]):
-        # key, goal_candidate, agent_start_pos, all_goals
+        # i_iter, key, goal_candidate, agent_start_pos, all_goals
         i_iter, _, goal, agent, all_goals = reset_input
         dist_min = jnp.linalg.norm(all_goals - goal, axis=1).min()
         collide = dist_min <= min_dist
