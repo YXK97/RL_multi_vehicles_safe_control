@@ -163,7 +163,7 @@ class MPE(MultiAgentEnv, ABC):
         obstacles = graph.type_states(type_idx=2, n_type=self.params["n_obs"]) if self.params["n_obs"] > 0 else None
 
         # calculate next graph
-        action = self.clip_action(action)
+        action = self.transform_action(action)
         next_agent_states = self.agent_step_euler(agent_states, action)
         next_env_state = MPEEnvState(next_agent_states, goals, obstacles)
         info = {}

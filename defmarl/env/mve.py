@@ -235,7 +235,7 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         obstacles = graph.type_states(type_idx=MVE.OBST, n_type=self.params["n_obsts"]) if self.params["n_obsts"] > 0 else None
 
         # calculate next graph
-        action = self.clip_action(action)
+        action = self.transform_action(action)
         next_agent_states = self.agent_step_euler(agent_states, action)
         next_env_state = MVEEnvState(next_agent_states, goals, obstacles)
         info = {}
@@ -502,8 +502,8 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         pass
 
     def action_lim(self) -> Tuple[Action, Action]:
-        lower_lim = jnp.array([-5., -30.]) # v(允许倒车), delta
-        upper_lim = jnp.array([30., 30.])
+        lower_lim = jnp.array([-5., -30.])[None, :].repeat(self.num_agents, axis=0) # v(允许倒车), delta
+        upper_lim = jnp.array([30., 30.])[None, :].repeat(self.num_agents, axis=0)
         return lower_lim, upper_lim
 
     @ft.partial(jax.jit, static_argnums=(0,))

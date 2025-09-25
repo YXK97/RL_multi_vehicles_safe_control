@@ -14,7 +14,7 @@ class MVEDistMeasureTarget(MVE):
     def __init__(self,
                  num_agents: int,
                  area_size: Optional[float] = None,
-                 max_step: int = 256,
+                 max_step: int = 1024,
                  max_travel: Optional[float] = None,
                  dt: float = 0.05,
                  params: dict = None

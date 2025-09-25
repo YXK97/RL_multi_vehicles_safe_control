@@ -87,9 +87,14 @@ class MultiAgentEnv(ABC):
         lower_limit, upper_limit = self.state_lim(state)
         return jnp.clip(state, lower_limit, upper_limit)
 
-    def clip_action(self, action: Action) -> Action:
+    def transform_action(self, action: Action) -> Action:
+        # 神经网络采样得到的输出在[-1, 1]之间
         lower_limit, upper_limit = self.action_lim()
-        return jnp.clip(action, lower_limit, upper_limit)
+        action_center = (lower_limit + upper_limit) / 2
+        action_half = upper_limit - action_center
+        transformed_action = jnp.multiply(action, action_half) + action_center
+        # return jnp.clip(action, lower_limit, upper_limit)
+        return transformed_action
 
     @abstractproperty
     def state_dim(self) -> int:
