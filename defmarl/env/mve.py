@@ -58,6 +58,7 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         #"obst_state_range": jnp.array([-15., 20., -7., 7.5, 0., 360., 0., 0.]), # 随机生成obstacle的状态范围
 
         "dist2goal_bias": 0.5, # 用于判断agent是否到达goal m
+
         "theta2goal_bias": 0.98 # 用于判断agent航向角是否满足goal的要求，即agent方向向量和goal方向向量夹角的cos是否大于0.98（是否小于10度）
     }
     PARAMS.update({
@@ -118,7 +119,7 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         """先生成obstacle，将obstacle视为agent，通过cost计算是否valid
         再生成agent和goal，将之前生成的obstacle还原为obstacle，利用cost计算是否valid"""
         state_low_idx = jnp.array([0,2,4])
-        state_high_idx = jnp.array([1,3,7])
+        state_high_idx = jnp.array([1,3,5])
 
         if self.params["n_obsts"] > 0:
             # randomly generate obstacles
@@ -220,7 +221,7 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         new_xs = xs + action_vs / 3.6 * jnp.cos(thetas * jnp.pi / 180 + betas) * self.dt
         new_ys = ys + action_vs / 3.6 * jnp.sin(thetas * jnp.pi / 180 + betas) * self.dt
         new_thetas = (thetas + action_vs / 3.6 * jnp.cos(betas) * jnp.tan(action_deltas * jnp.pi / 180)
-                      / self.params["ego_L"] * self.dt * 180 / jnp.pi)
+                      / self.params["ego_L"] * self.dt * 180 / jnp.pi) % 360 # 将所有角度归一到[0, 360)上
 
         n_state_agent_new = jnp.concatenate([new_xs[:, None], new_ys[:, None], new_thetas[:, None], action_vs[:, None]], axis=1)
         assert n_state_agent_new.shape == (self.num_agents, self.state_dim)
@@ -270,14 +271,18 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
 
         ax: Axes
         fig, ax = plt.subplots(1, 1, figsize=(20,
-                                (self.area_size[3]-self.area_size[2])*20/(self.area_size[1]-self.area_size[0]))
+                                (self.area_size[3]+3-(self.area_size[2]-3))*20/(self.area_size[1]+3-(self.area_size[0]-3)))
                                , dpi=100)
-        ax.set_xlim(self.area_size[0], self.area_size[1])
-        ax.set_ylim(self.area_size[2], self.area_size[3])
+        ax.set_xlim(self.area_size[0]-3, self.area_size[1]+3)
+        ax.set_ylim(self.area_size[2]-3, self.area_size[3]+3)
         ax.set(aspect="equal")
         plt.axis("on")
         if viz_opts is None:
             viz_opts = {}
+
+        # 画y轴方向的限制，即车道边界限制
+        ax.axhline(y=self.area_size[2], linewidth=2, color='k')
+        ax.axhline(y=self.area_size[3], linewidth=2, color='k')
 
         # plot the first frame
         T_graph = rollout.graph
@@ -294,13 +299,18 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
             obsts_pos = obsts_state_bbsize[:, :2]
             obsts_theta = obsts_state_bbsize[:, 2]
             obsts_bb_size = obsts_state_bbsize[:, 4:6]
+            obsts_radius = jnp.linalg.norm(obsts_bb_size, axis=1)
+            plot_obsts_arrow = [plt.Arrow(x=obsts_pos[i,0], y=obsts_pos[i,1],
+                                          dx=jnp.cos(obsts_theta[i]*jnp.pi/180)*obsts_radius[i]/2,
+                                          dy=jnp.sin(obsts_theta[i]*jnp.pi/180)*obsts_radius[i]/2,
+                                          width=1, color=obst_color, alpha=1.0) for i in range(len(obsts_theta))]
             plot_obsts_rec = [plt.Rectangle(xy=tuple(obsts_pos[i,:]-obsts_bb_size[i,:]/2),
                                             width=obsts_bb_size[i,0], height=obsts_bb_size[i,1],
                                             angle=obsts_theta[i], rotation_point='center',
-                                            color=obst_color, linewidth=0.0, alpha=1.0) for i in range(len(obsts_theta))]
+                                            color=obst_color, linewidth=0.0, alpha=0.6) for i in range(len(obsts_theta))]
             plot_obsts_cir = [plt.Circle(xy=(obsts_pos[i,0], obsts_pos[i,1]), radius=self.params["obst_radius"],
                                          color=obst_color, linewidth=0.0, alpha=0.3) for i in range(len(obsts_theta))]
-            col_obsts = MutablePatchCollection(plot_obsts_rec+plot_obsts_cir, match_original=True, zorder=5)
+            col_obsts = MutablePatchCollection(plot_obsts_arrow+plot_obsts_rec+plot_obsts_cir, match_original=True, zorder=5)
             ax.add_collection(col_obsts)
 
         # plot goals
@@ -308,13 +318,19 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         goals_pos = goals_state_bbsize[:, :2]
         goals_theta = goals_state_bbsize[:, 2]
         goals_bb_size = goals_state_bbsize[:, 4:6]
+        goals_radius = jnp.linalg.norm(goals_bb_size, axis=1)
+        plot_goals_arrow = [plt.Arrow(x=goals_pos[i,0], y=goals_pos[i,1],
+                                      dx=jnp.cos(goals_theta[i]*jnp.pi/180)*goals_radius[i]/2,
+                                      dy=jnp.sin(goals_theta[i]*jnp.pi/180)*goals_radius[i]/2,
+                                      width=goals_radius[i]/jnp.mean(obsts_radius),
+                                      alpha=1.0, color=goal_color) for i in range(n_goals)]
         plot_goals_rec = [plt.Rectangle(xy=tuple(goals_pos[i,:]-goals_bb_size[i,:]/2),
                                         width=goals_bb_size[i,0], height=goals_bb_size[i,1],
                                         angle=goals_theta[i], rotation_point='center',
-                                        color=goal_color, linewidth=0.0, alpha=1.0) for i in range(n_goals)]
+                                        color=goal_color, linewidth=0.0, alpha=0.6) for i in range(n_goals)]
         plot_goals_cir = [plt.Circle(xy=(goals_pos[i,0], goals_pos[i,1]), radius=self.params["ego_radius"],
                                      color=goal_color, linewidth=0.0, alpha=0.3) for i in range(n_goals)]
-        col_goals = MutablePatchCollection(plot_goals_rec+plot_goals_cir, match_original=True, zorder=6)
+        col_goals = MutablePatchCollection(plot_goals_arrow+plot_goals_rec+plot_goals_cir, match_original=True, zorder=6)
         ax.add_collection(col_goals)
 
         # plot agents
@@ -322,13 +338,19 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         agents_pos = agents_state_bbsize[:, :2]
         agents_theta = agents_state_bbsize[:, 2]
         agents_bb_size = agents_state_bbsize[:, 4:6]
+        agents_radius = jnp.linalg.norm(agents_bb_size, axis=1)
+        plot_agents_arrow = [plt.Arrow(x=agents_pos[i, 0], y=agents_pos[i, 1],
+                                       dx=jnp.cos(agents_theta[i] * jnp.pi / 180) * agents_radius[i]/2,
+                                       dy=jnp.sin(agents_theta[i] * jnp.pi / 180) * agents_radius[i]/2,
+                                       width=agents_radius[i] / jnp.mean(obsts_radius),
+                                       alpha=1.0, color=agent_color) for i in range(self.num_agents)]
         plot_agents_rec = [plt.Rectangle(xy=tuple(agents_pos[i,:]-agents_bb_size[i,:]/2),
                                          width=agents_bb_size[i,0], height=agents_bb_size[i,1],
                                          angle=agents_theta[i], rotation_point='center',
-                                         color=agent_color, linewidth=0.0, alpha=1.0) for i in range(self.num_agents)]
+                                         color=agent_color, linewidth=0.0, alpha=0.6) for i in range(self.num_agents)]
         plot_agents_cir = [plt.Circle(xy=(agents_pos[i,0], agents_pos[i,1]), radius=self.params["ego_radius"],
                                       color=agent_color, linewidth=0.0, alpha=0.3) for i in range(self.num_agents)]
-        col_agents = MutablePatchCollection(plot_agents_rec+plot_agents_cir, match_original=True, zorder=7)
+        col_agents = MutablePatchCollection(plot_agents_arrow+plot_agents_rec+plot_agents_cir, match_original=True, zorder=7)
         ax.add_collection(col_agents)
 
         # plot edges
@@ -385,21 +407,34 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
             n_pos_t = graph.states[:-1, :2] # 最后一个node是padding，不要
             n_theta_t = graph.states[:-1, 2]
             n_bb_size_t = graph.nodes[:-1, 4:6]
+            n_radius = jnp.linalg.norm(n_bb_size_t, axis=1)
 
             # update agents' positions and labels
             for ii in range(self.num_agents):
+                plot_agents_arrow[ii].set_data(x=n_pos_t[ii, 0], y=n_pos_t[ii, 1],
+                                               dx=jnp.cos(n_theta_t[ii]*jnp.pi/180)*n_radius[ii]/2,
+                                               dy=jnp.sin(n_theta_t[ii]*jnp.pi/180)*n_radius[ii]/2)
                 plot_agents_rec[ii].set_xy(xy=tuple(n_pos_t[ii, :]-n_bb_size_t[ii, :]/2))
                 plot_agents_rec[ii].set_angle(angle=n_theta_t[ii])
                 plot_agents_cir[ii].set_center(xy=tuple(n_pos_t[ii, :]))
                 agent_labels[ii].set_position(n_pos_t[ii, :])
             # update goals' positions
             for ii in range(n_goals):
+                plot_goals_arrow[ii].set_data(x=n_pos_t[self.num_agents+ii, 0], y=n_pos_t[self.num_agents+ii, 1],
+                                              dx=jnp.cos(n_theta_t[self.num_agents+ii]*jnp.pi/180)*n_radius[self.num_agents+ii]/2,
+                                              dy=jnp.sin(n_theta_t[self.num_agents+ii]*jnp.pi/180)*n_radius[self.num_agents+ii]/2)
                 plot_goals_rec[ii].set_xy(xy=tuple(n_pos_t[self.num_agents+ii, :]-n_bb_size_t[self.num_agents+ii, :]/2))
                 plot_goals_rec[ii].set_angle(angle=n_theta_t[self.num_agents+ii])
                 plot_goals_cir[ii].set_center(xy=tuple(n_pos_t[self.num_agents+ii, :]))
             # update obstacles' positions
             if self.params["n_obsts"] > 0:
                 for ii in range(self.params["n_obsts"]):
+                    plot_obsts_arrow[ii].set_data(x=n_pos_t[self.num_agents+n_goals+ii, 0],
+                                                  y=n_pos_t[self.num_agents+n_goals+ii, 1],
+                                                  dx=jnp.cos(n_theta_t[self.num_agents+n_goals+ii]*jnp.pi/180)*n_radius[
+                                                      self.num_agents+n_goals+ii]/2,
+                                                  dy=jnp.sin(n_theta_t[self.num_agents+n_goals+ii]*jnp.pi/180)*n_radius[
+                                                      self.num_agents+n_goals+ii]/2)
                     plot_obsts_rec[ii].set_xy(xy=tuple(n_pos_t[self.num_agents+n_goals+ii, :]-n_bb_size_t[self.num_agents+n_goals+ii, :]/2))
                     plot_obsts_rec[ii].set_angle(angle=n_theta_t[self.num_agents+n_goals+ii])
                     plot_obsts_cir[ii].set_center(xy=tuple(n_pos_t[self.num_agents+n_goals+ii, :]))

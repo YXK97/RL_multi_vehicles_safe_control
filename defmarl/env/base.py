@@ -7,6 +7,7 @@ from typing import NamedTuple, Optional, Tuple
 from ..trainer.data import Rollout
 from ..utils.graph import GraphsTuple
 from ..utils.typing import Action, Array, Cost, Done, Info, Reward, State
+from jax.debug import print as jprint
 
 
 class StepResult(NamedTuple):
@@ -93,6 +94,9 @@ class MultiAgentEnv(ABC):
         action_center = (lower_limit + upper_limit) / 2
         action_half = upper_limit - action_center
         transformed_action = jnp.multiply(action, action_half) + action_center
+        # jprint("action_lim={lower_limit},{upper_limit}", lower_limit=lower_limit, upper_limit=upper_limit)
+        # jprint("action={action}", action=action)
+        # jprint("transformed_action={transformed_action}", transformed_action=transformed_action)
         # return jnp.clip(action, lower_limit, upper_limit)
         return transformed_action
 

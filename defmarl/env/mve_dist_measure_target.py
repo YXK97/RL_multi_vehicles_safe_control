@@ -25,8 +25,8 @@ class MVEDistMeasureTarget(MVE):
     def reward_min(self) -> float:
         return -((jnp.linalg.norm(jnp.array([self.area_size[jnp.array([0,2])] - self.area_size[jnp.array([1,3])]])) * 0.01
                   + 0.001
-                  + 2*0.2
-                  + 0.0005
+                  + 2*0.02
+                  + 0.00005
                   + 35**2*0.00001
                   + 30**2*0.00001) * self.max_episode_steps)
 
@@ -54,9 +54,9 @@ class MVEDistMeasureTarget(MVE):
         goal_theta_grad = goals[:, 2] * jnp.pi/180
         goal_vec = jnp.concatenate([jnp.cos(goal_theta_grad)[:, None], jnp.sin(goal_theta_grad)[:, None]], axis=1)
         theta2goal = jnp.einsum('ij,ij->i', agent_vec, goal_vec)
-        reward += (theta2goal.mean()-1) * 0.2
+        reward += (theta2goal.mean()-1) * 0.02
         # 航向角满足要求奖励
-        reward -= jnp.where(theta2goal < self.params["theta2goal_bias"], 1.0, 0.0).mean() * 0.0005
+        reward -= jnp.where(theta2goal < self.params["theta2goal_bias"], 1.0, 0.0).mean() * 0.00005
 
         # 速率一致性奖励
         reward -= ((action[:,0]-agent_states[:,-1]) ** 2).mean() * 0.00001
@@ -75,12 +75,18 @@ class MVEDistMeasureTarget(MVE):
         agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
         obstacle_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
 
+        agent_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
+        agent_radius = jnp.linalg.norm(agent_nodes[0, 4:6]/2)
+        if num_obsts > 0:
+            obstacle_nodes = graph.type_nodes(type_idx=MVE.OBST, n_type=num_obsts)
+            obst_radius = jnp.linalg.norm(obstacle_nodes[0, 4:6]/2)
+
         # collision between agents
         agent_pos = agent_states[:, :2]
         dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1)
         dist += jnp.eye(num_agents) * 1e6
         min_dist = jnp.min(dist, axis=1)
-        agent_cost: Array = self.params["ego_radius"] * 2 + self.params["collide_extra_bias"] - min_dist
+        agent_cost: Array = agent_radius * 2 + self.params["collide_extra_bias"] - min_dist
 
         # collision between agents and obstacles
         if num_obsts == 0:
@@ -89,7 +95,7 @@ class MVEDistMeasureTarget(MVE):
             obstacle_pos = obstacle_states[:, :2]
             dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(obstacle_pos, 0), axis=-1)
             min_dist = jnp.min(dist, axis=1)
-            obst_cost: Array = self.params["ego_radius"] + self.params["obst_radius"] + self.params["collide_extra_bias"] - min_dist
+            obst_cost: Array = agent_radius + obst_radius + self.params["collide_extra_bias"] - min_dist
 
         # 对于agent是否超出边界的判断
         if "rollout_state_range" in self.params:
@@ -155,6 +161,6 @@ class MVEDistMeasureTarget(MVE):
         return [agent_agent_edges] + agent_goal_edges + agent_obst_edges
 
     def state_lim(self, state: Optional[State] = None) -> Tuple[State, State]:
-        lower_lim = self.PARAMS["rollout_state_range"][jnp.array([0,2,4,6])]
-        upper_lim = self.PARAMS["rollout_state_range"][jnp.array([1,3,5,7])]
+        lower_lim = self.params["rollout_state_range"][jnp.array([0,2,4,6])] + jnp.array([0,-3,0,0]) # y方向增加可行宽度（相当于增加护墙不让车跨越，让车学会不要超出道路限制）
+        upper_lim = self.params["rollout_state_range"][jnp.array([1,3,5,7])] + jnp.array([0,3,0,0])
         return lower_lim, upper_lim
