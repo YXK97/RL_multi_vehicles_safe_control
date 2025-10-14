@@ -437,7 +437,7 @@ class DefMARL(Algorithm):
         bTah_Qh, bT_Ql, bTa_Q = jax.vmap(
             ft.partial(compute_dec_efocp_gae, disc_gamma=self.gamma, gae_lambda=self.gae_lambda)
         )(Tah_hs=rollout.costs,
-          T_l=-rollout.rewards,
+          T_l=-rollout.rewards, # 注意这里这个负号！！！！！！！！
           T_z=rollout.zs.squeeze(-1)[:, :, 0],
           Tp1ah_Vh=bTp1ah_Vh,
           Tp1_Vl=bTp1_Vl)
