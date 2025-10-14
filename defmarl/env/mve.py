@@ -52,12 +52,12 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         "collide_extra_bias": 0.1, # 用于计算cost时避碰的margin m
 
         "default_state_range": jnp.array([-35., 35., -9., 9., 0., 360., -5., 30.]), # [x_l, x_u, y_l, y_u, theta_l, theta_u, v_l, v_u]
-        "rollout_state_range": jnp.array([-jnp.inf, jnp.inf, -9., 9., 0., 360., -5., 30.]), # rollout过程中xy坐标和theta的限制
+        "rollout_state_range": jnp.array([-35., 35., -9., 9., 0., 360., -5., 30.]), # rollout过程中xy坐标和theta的限制
         #"agent_init_state_range": jnp.array([25., 35., -7., 7.5, 150., 210., 0., 0.]), # 用于agent初始化的状态范围
         #"goal_state_range": jnp.array([-30., -20., -6., 6., 180., 180., 0., 0.]), # 随机生成goal时的状态范围
         #"obst_state_range": jnp.array([-15., 20., -7., 7.5, 0., 360., 0., 0.]), # 随机生成obstacle的状态范围
 
-        "dist2goal_bias": 0.5, # 用于判断agent是否到达goal m
+        "dist2goal_bias": 0.1, # 用于判断agent是否到达goal m
 
         "theta2goal_bias": 0.98 # 用于判断agent航向角是否满足goal的要求，即agent方向向量和goal方向向量夹角的cos是否大于0.98（是否小于10度）
     }
@@ -108,7 +108,8 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
 
     @property
     def n_cost(self) -> int:
-        return 6 # agent间碰撞(1) + agent-obstacle碰撞(1) + agent超出x轴范围(高+低，2) + agent超出y轴范围(高+低，2)
+        #return 6 # agent间碰撞(1) + agent-obstacle碰撞(1) + agent超出x轴范围(高+低，2) + agent超出y轴范围(高+低，2)
+        return 2 # agent间碰撞(1) + agent-obstacle碰撞(1)
 
     @property
     def cost_components(self) -> Tuple[str, ...]:
@@ -271,7 +272,7 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
 
         ax: Axes
         fig, ax = plt.subplots(1, 1, figsize=(20,
-                                (self.area_size[3]+3-(self.area_size[2]-3))*20/(self.area_size[1]+3-(self.area_size[0]-3)))
+                                (self.area_size[3]+3-(self.area_size[2]-3))*20/(self.area_size[1]+3-(self.area_size[0]-3))+4)
                                , dpi=100)
         ax.set_xlim(self.area_size[0]-3, self.area_size[1]+3)
         ax.set_ylim(self.area_size[2]-3, self.area_size[3]+3)
@@ -295,7 +296,7 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
 
         # plot obstacles
         if self.params["n_obsts"] > 0:
-            obsts_state_bbsize = graph0.type_nodes(type_idx=MVE.OBST, n_type=self.params["n_obsts"])[:, :6]  # [n_obsts, 3] x,y,theta,v,width,height
+            obsts_state_bbsize = graph0.type_nodes(type_idx=MVE.OBST, n_type=self.params["n_obsts"])[:, :6]  # [n_obsts, 6] x,y,theta,v,width,height
             obsts_pos = obsts_state_bbsize[:, :2]
             obsts_theta = obsts_state_bbsize[:, 2]
             obsts_bb_size = obsts_state_bbsize[:, 4:6]
