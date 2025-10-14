@@ -121,7 +121,11 @@ class Trainer:
         test_zmin_keys = jr.split(test_key, 1_000)[2 * self.n_env_test: 3 * self.n_env_test]
 
         pbar = tqdm(total=self.steps, ncols=80)
-        for step in range(0, self.steps + 1):
+
+        # 提前分配每一个step所用的key，避免每次reset的结果都相同
+        all_steps_keys = jr.split(self.key, self.steps+1)
+
+        for step, step_key in enumerate(all_steps_keys):
             # evaluate the algorithm
             if step % self.eval_interval == 0:
                 eval_info = {}
@@ -175,8 +179,7 @@ class Trainer:
                 self.algo.save(os.path.join(self.model_dir), step)
 
             # collect rollouts
-            key_x0, self.key = jax.random.split(self.key)
-            key_x0 = jax.random.split(key_x0, self.n_env_train)
+            key_x0 = jax.random.split(step_key, self.n_env_train)
             rollouts = self.algo.collect(self.algo.params, key_x0)
 
             # update the algorithm
