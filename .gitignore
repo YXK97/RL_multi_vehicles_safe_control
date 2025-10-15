@@ -5,5 +5,4 @@ wandb
 logs
 figs
 *.egg-info
-README.md
 test_yxk.py
