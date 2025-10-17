@@ -5,14 +5,18 @@ import jax
 import jax.random as jr
 import functools as ft
 import jax.numpy as jnp
+import jax.tree_util as jtu
 
 from time import time
+
 from tqdm import tqdm
+from typing import Callable
 
 from .data import Rollout
-from .utils import test_rollout
+from .utils import eval_rollout
 from ..env import MultiAgentEnv
 from ..algo.base import Algorithm
+from ..utils.typing import Array, PRNGKey
 
 
 class Trainer:
@@ -23,21 +27,23 @@ class Trainer:
             env_test: MultiAgentEnv,
             algo: Algorithm,
             gamma: float,
-            n_env_train: int,
-            n_env_test: int,
+            n_env_train_per_gpu: int,
+            n_env_eval_per_gpu: int,
             log_dir: str,
             seed: int,
             params: dict,
-            save_log: bool = True
+            save_log: bool = True,
+            num_gpu: int = 1
     ):
         self.env = env
         self.env_test = env_test
         self.algo = algo
         self.gamma = gamma
-        self.n_env_train = n_env_train
-        self.n_env_test = n_env_test
+        self.n_env_train_per_gpu = n_env_train_per_gpu
+        self.n_env_eval_per_gpu = n_env_eval_per_gpu
         self.log_dir = log_dir
         self.seed = seed
+        self.num_gpu = num_gpu
 
         if Trainer._check_params(params):
             self.params = params
@@ -91,10 +97,10 @@ class Trainer:
         zmin_fn = lambda graph, value_rnn_state, params: \
             (jnp.array([[-self.env_test.reward_max]]).repeat(self.env.num_agents, axis=0), value_rnn_state)
 
-        def test_fn_single(params, z_fn, key):
+        def eval_fn_single(params, z_fn, key):
             act_fn = ft.partial(self.algo.act, params=params)
             z_fn = ft.partial(z_fn, params=params) if z_fn is not None else None
-            return test_rollout(
+            return eval_rollout(
                 self.env_test,
                 act_fn,
                 init_rnn_state,
@@ -103,87 +109,127 @@ class Trainer:
                 z_fn
             )
 
-        test_opt_fn = lambda params, keys: (
-            jax.vmap(ft.partial(
-                test_fn_single, params, self.algo.get_opt_z if hasattr(self.algo, 'get_opt_z') else None))(keys)
+        eval_opt_fn = lambda params, keys: (jax.vmap(ft.partial(eval_fn_single, params,
+            self.algo.get_opt_z if hasattr(self.algo, 'get_opt_z') else None))(keys)
         )
-        test_zmin_fn = lambda params, keys: jax.vmap(ft.partial(test_fn_single, params, zmin_fn))(keys)
-        test_zmax_fn = lambda params, keys: jax.vmap(ft.partial(test_fn_single, params, zmax_fn))(keys)
+        eval_zmax_fn = lambda params, keys: jax.vmap(ft.partial(eval_fn_single, params, zmax_fn))(keys)
+        eval_zmin_fn = lambda params, keys: jax.vmap(ft.partial(eval_fn_single, params, zmin_fn))(keys)
 
-        test_opt_fn = jax.jit(test_opt_fn)
-        test_zmin_fn = jax.jit(test_zmin_fn)  # aggressive
-        test_zmax_fn = jax.jit(test_zmax_fn)  # conservative
+        eval_opt_fn = jax.jit(eval_opt_fn)
+        eval_zmax_fn = jax.jit(eval_zmax_fn)  # conservative
+        eval_zmin_fn = jax.jit(eval_zmin_fn) # aggressive
 
         # start training
-        test_key = jr.PRNGKey(self.seed)
-        test_keys = jr.split(test_key, 1_000)[:self.n_env_test]
-        test_zmax_keys = jr.split(test_key, 1_000)[self.n_env_test: 2 * self.n_env_test]
-        test_zmin_keys = jr.split(test_key, 1_000)[2 * self.n_env_test: 3 * self.n_env_test]
-
         pbar = tqdm(total=self.steps, ncols=80)
 
-        # 提前分配每一个step所用的key，避免每次reset的结果都相同
+        # 用于测试的key
+        eval_key = jr.PRNGKey(self.seed)
+        eval_keys = jr.split(eval_key, self.num_gpu * self.n_env_eval_per_gpu * 3)
+        G_eval_opt_keys = eval_keys[:self.num_gpu * self.n_env_eval_per_gpu, :].reshape(self.num_gpu, self.n_env_eval_per_gpu, -1)
+        G_eval_zmax_keys = eval_keys[self.num_gpu * self.n_env_eval_per_gpu: 2 * self.num_gpu * self.n_env_eval_per_gpu, :].reshape(
+            self.num_gpu, self.n_env_eval_per_gpu, -1)
+        G_eval_zmin_keys = eval_keys[2 * self.num_gpu * self.n_env_eval_per_gpu: 3 * self.num_gpu * self.n_env_eval_per_gpu, :].reshape(
+            self.num_gpu, self.n_env_eval_per_gpu, -1)
+
+        # 用于训练的key
         all_steps_keys = jr.split(self.key, self.steps+1)
 
+        @ft.partial(jax.pmap, in_axes=(None, 0), axis_name='n_gpu')
+        def opt_rollout_and_eval(params: dict, eval_keys: PRNGKey):
+            eval_rollouts: Rollout = eval_opt_fn(params, eval_keys)
+            bT_total_reward = eval_rollouts.rewards.sum(axis=-1)
+            ba_last_reward = eval_rollouts.rewards[..., -1]
+            reward_min = jax.lax.pmin(bT_total_reward.min(), axis_name='n_gpu')
+            reward_max = jax.lax.pmax(bT_total_reward.max(), axis_name='n_gpu')
+            reward_mean = jax.lax.pmean(bT_total_reward.mean(), axis_name='n_gpu')
+            reward_final = jax.lax.pmean(ba_last_reward.mean(), axis_name='n_gpu')
+            bTah_cost = eval_rollouts.costs
+            cost = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            unsafe_frac = jax.lax.pmean((bTah_cost.max(axis=-1).max(axis=-2) >= 1e-6).mean(), axis_name='n_gpu')
+            opt_z0 = jax.lax.pmean(eval_rollouts.zs[0, 0, 0, 0], axis_name='n_gpu')  # TODO：zs的维度是多少？
+            return reward_min, reward_max, reward_mean, reward_final, cost, unsafe_frac, opt_z0
+
+        @ft.partial(jax.pmap, in_axes=(None, 0), axis_name='n_gpu')
+        def zmax_rollout_and_eval(params: dict, eval_keys: PRNGKey):
+            eval_rollouts: Rollout = eval_zmax_fn(params, eval_keys)
+            bT_total_reward = eval_rollouts.rewards.sum(axis=-1)
+            ba_last_reward = eval_rollouts.rewards[..., -1]
+            reward_mean = jax.lax.pmean(bT_total_reward.mean(), axis_name='n_gpu')
+            reward_final = jax.lax.pmean(ba_last_reward.mean(), axis_name='n_gpu')
+            bTah_cost = eval_rollouts.costs
+            cost = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            unsafe_frac = jax.lax.pmean((bTah_cost.max(axis=-1).max(axis=-2) >= 1e-6).mean(), axis_name='n_gpu')
+            return reward_mean, reward_final, cost, unsafe_frac
+
+        @ft.partial(jax.pmap, in_axes=(None, 0), axis_name='n_gpu')
+        def zmin_rollout_and_eval(params: dict, eval_keys: PRNGKey):
+            eval_rollouts: Rollout = eval_zmin_fn(params, eval_keys)
+            bT_total_reward = eval_rollouts.rewards.sum(axis=-1)
+            ba_last_reward = eval_rollouts.rewards[..., -1]
+            reward_mean = jax.lax.pmean(bT_total_reward.mean(), axis_name='n_gpu')
+            reward_final = jax.lax.pmean(ba_last_reward.mean(), axis_name='n_gpu')
+            bTah_cost = eval_rollouts.costs
+            cost = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            unsafe_frac = jax.lax.pmean((bTah_cost.max(axis=-1).max(axis=-2) >= 1e-6).mean(), axis_name='n_gpu')
+            return  reward_mean, reward_final, cost, unsafe_frac
+
         for step, step_key in enumerate(all_steps_keys):
+            # 在eval/collect/update前断开参数追踪
+            current_params = jax.lax.stop_gradient(self.algo.params)
+            # 提取单个设备的参数（去掉设备维度）
+            if step > 0:
+                current_params = jtu.tree_map(lambda x: x[0], current_params)
             # evaluate the algorithm
             if step % self.eval_interval == 0:
+                # eval_params = jax.device_get(self.algo.params)
                 eval_info = {}
                 if step % self.full_eval_interval == 0:
                     # full test with optimal z
-                    test_rollouts: Rollout = test_opt_fn(self.algo.params, test_keys)
-                    total_reward = test_rollouts.rewards.sum(axis=-1)
-                    reward_min, reward_max = total_reward.min(), total_reward.max()
-                    reward_mean = np.mean(total_reward)
-                    reward_final = np.mean(test_rollouts.rewards[:, -1])
-                    cost = jnp.maximum(test_rollouts.costs, 0.0).max(axis=-1).max(axis=-1).sum(axis=-1).mean()
-                    unsafe_frac = np.mean(test_rollouts.costs.max(axis=-1).max(axis=-2) >= 1e-6)
+                    reward_min, reward_max, reward_mean, reward_final, cost, unsafe_frac, opt_z0 = \
+                        opt_rollout_and_eval(current_params, G_eval_opt_keys)
                     eval_info = eval_info | {
-                        "eval/reward": reward_mean,
-                        "eval/reward_final": reward_final,
-                        "eval/cost": cost,
-                        "eval/unsafe_frac": unsafe_frac,
-                        "eval/opt_z0": test_rollouts.zs[0, 0, 0, 0],
+                        "eval/reward": float(reward_mean[0]),
+                        "eval/reward_final": float(reward_final[0]),
+                        "eval/cost": float(cost[0]),
+                        "eval/unsafe_frac": float(unsafe_frac[0]),
+                        "eval/opt_z0": float(opt_z0[0]),
                     }
                     time_since_start = time() - start_time
-                    eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, reward: {reward_mean:9.4f}, '
-                                    f'min/max reward: {reward_min:7.2f}/{reward_max:7.2f}, cost: {cost:8.4f}, '
-                                    f'unsafe_frac: {unsafe_frac:6.2f}')
+                    eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, reward: {float(reward_mean[0]):9.4f}, '
+                                    f'min/max reward: {float(reward_min[0]):7.2f}/{float(reward_max[0]):7.2f}, cost: {float(cost[0]):8.4f}, '
+                                    f'unsafe_frac: {float(unsafe_frac[0]):6.2f}')
+
                     tqdm.write(eval_verbose)
 
                 # partial test with zmin and zmax
-                test_zmax_rollouts: Rollout = test_zmax_fn(self.algo.params, test_zmax_keys)
-                test_zmin_rollouts: Rollout = test_zmin_fn(self.algo.params, test_zmin_keys)
-                reward_mean_zmax = np.mean(test_zmax_rollouts.rewards.sum(axis=-1))
-                reward_mean_zmin = np.mean(test_zmin_rollouts.rewards.sum(axis=-1))
-                reward_final_zmax = np.mean(test_zmax_rollouts.rewards[:, -1])
-                reward_final_zmin = np.mean(test_zmin_rollouts.rewards[:, -1])
-                cost_zmin = jnp.maximum(test_zmin_rollouts.costs, 0.0).max(axis=-1).max(axis=-1).sum(axis=-1).mean()
-                cost_zmax = jnp.maximum(test_zmax_rollouts.costs, 0.0).max(axis=-1).max(axis=-1).sum(axis=-1).mean()
-                unsafe_frac_zmin = np.mean(test_zmin_rollouts.costs.max(axis=-1).max(axis=-2) >= 1e-6)
-                unsafe_frac_zmax = np.mean(test_zmax_rollouts.costs.max(axis=-1).max(axis=-2) >= 1e-6)
+                reward_mean_zmax, reward_final_zmax, cost_zmax, unsafe_frac_zmax = \
+                    zmax_rollout_and_eval(current_params, G_eval_zmax_keys)
+                reward_mean_zmin, reward_final_zmin, cost_zmin, unsafe_frac_zmin = \
+                    zmin_rollout_and_eval(current_params, G_eval_zmin_keys)
                 eval_info = eval_info | {
-                    "eval/reward_zmin": reward_mean_zmin,
-                    "eval/reward_zmax": reward_mean_zmax,
-                    "eval/reward_final_zmin": reward_final_zmin,
-                    "eval/reward_final_zmax": reward_final_zmax,
-                    "eval/cost_zmin": cost_zmin,
-                    "eval/cost_zmax": cost_zmax,
-                    "eval/unsafe_frac_zmin": unsafe_frac_zmin,
-                    "eval/unsafe_frac_zmax": unsafe_frac_zmax,
+                    "eval/reward_zmax": float(reward_mean_zmax[0]),
+                    "eval/reward_zmin": float(reward_mean_zmin[0]),
+                    "eval/reward_final_zmax": float(reward_final_zmax[0]),
+                    "eval/reward_final_zmin": float(reward_final_zmin[0]),
+                    "eval/cost_zmax": float(cost_zmax[0]),
+                    "eval/cost_zmin": float(cost_zmin[0]),
+                    "eval/unsafe_frac_zmax": float(unsafe_frac_zmax[0]),
+                    "eval/unsafe_frac_zmin": float(unsafe_frac_zmin[0]),
                 }
                 wandb.log(eval_info, step=self.update_steps)
 
             # save the model
             if self.save_log and step % self.save_interval == 0:
-                self.algo.save(os.path.join(self.model_dir), step)
+                self.algo.save(os.path.join(self.model_dir), step, params_to_save=current_params)
 
             # collect rollouts
-            key_x0 = jax.random.split(step_key, self.n_env_train)
-            rollouts = self.algo.collect(self.algo.params, key_x0)
+            G_key_x0 = jax.random.split(step_key, self.num_gpu * self.n_env_train_per_gpu).reshape(
+                self.num_gpu, self.n_env_train_per_gpu, -1)
+            rollouts = self.algo.collect(current_params, G_key_x0)
 
             # update the algorithm
             update_info = self.algo.update(rollouts, step)
+            update_info = jtu.tree_map(lambda x: float(x[0]), update_info)
             wandb.log(update_info, step=self.update_steps)
             self.update_steps += 1
 

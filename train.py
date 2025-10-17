@@ -5,23 +5,27 @@ import ipdb
 import numpy as np
 import wandb
 import yaml
+import jax
 
 from defmarl.algo import make_algo
 from defmarl.env import make_env
 from defmarl.trainer.trainer import Trainer
 from defmarl.trainer.utils import is_connected
 
-
 def train(args):
     print(f"> Running train.py {args}")
+    print(f"> Using {args.n_gpu} devices")
 
     # set up environment variables and seed
+    os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
+    os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    if not is_connected():
-        os.environ["WANDB_MODE"] = "offline"
-    np.random.seed(args.seed)
     if args.debug:
         os.environ["WANDB_MODE"] = "disabled"
+    elif not is_connected():
+        os.environ["WANDB_MODE"] = "offline"
+    np.random.seed(args.seed)
+
 
     # create environments
     env = make_env(
@@ -98,11 +102,12 @@ def train(args):
         algo=algo,
         gamma=0.99,
         log_dir=log_dir,
-        n_env_train=args.n_env_train,
-        n_env_test=args.n_env_test,
+        n_env_train_per_gpu=args.n_env_train_per_gpu,
+        n_env_eval_per_gpu=args.n_env_eval_per_gpu,
         seed=args.seed,
         params=train_params,
         save_log=not args.debug,
+        num_gpu=args.n_gpu
     )
 
     # save config
@@ -139,9 +144,9 @@ def main():
 
     # training options
     parser.add_argument("--no-rnn", action="store_true", default=False)
-    parser.add_argument("--n-env-train", type=int, default=128)
+    parser.add_argument("--n-env-train-per-gpu", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=16384)
-    parser.add_argument("--n-env-test", type=int, default=32)
+    parser.add_argument("--n-env-eval-per-gpu", type=int, default=32)
     parser.add_argument("--log-dir", type=str, default="./logs")
     parser.add_argument("--eval-interval", type=int, default=1)
     parser.add_argument("--full-eval-interval", type=int, default=10)
@@ -158,6 +163,8 @@ def main():
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--use-lstm", action="store_true", default=False)
     parser.add_argument("--rnn-step", type=int, default=16)
+
+    parser.add_argument("--n-gpu", type=int, default=jax.local_device_count())
 
     args = parser.parse_args()
     train(args)

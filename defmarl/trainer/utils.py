@@ -71,7 +71,7 @@ def rollout(
     return rollout_data
 
 
-def test_rollout(
+def eval_rollout(
         env: MultiAgentEnv,
         actor: Callable,
         init_actor_rnn_state: Array,
