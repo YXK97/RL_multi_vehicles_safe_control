@@ -176,9 +176,6 @@ class Trainer:
         for step, step_key in enumerate(all_steps_keys):
             # 在eval/collect/update前断开参数追踪
             current_params = jax.lax.stop_gradient(self.algo.params)
-            # 提取单个设备的参数（去掉设备维度）
-            if step > 0:
-                current_params = jtu.tree_map(lambda x: x[0], current_params)
             # evaluate the algorithm
             if step % self.eval_interval == 0:
                 # eval_params = jax.device_get(self.algo.params)
@@ -229,7 +226,6 @@ class Trainer:
 
             # update the algorithm
             update_info = self.algo.update(rollouts, step)
-            update_info = jtu.tree_map(lambda x: float(x[0]), update_info)
             wandb.log(update_info, step=self.update_steps)
             self.update_steps += 1
 

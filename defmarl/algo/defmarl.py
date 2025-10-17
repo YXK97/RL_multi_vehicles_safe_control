@@ -359,12 +359,17 @@ class DefMARL(Algorithm):
             rollouts,
             step
         )
-        self.critic_train_state = critic_train_state
-        self.Vh_train_state = Vh_train_state
-        self.policy_train_state = policy_train_state
+        critic_train_state_single = jtu.tree_map(lambda x: x[0], critic_train_state)
+        Vh_train_state_single = jtu.tree_map(lambda x: x[0], Vh_train_state)
+        policy_train_state_single = jtu.tree_map(lambda x: x[0], policy_train_state)
+        rollout_single = jtu.tree_map(lambda x: x[0], rollouts)
+        update_info_single = jtu.tree_map(lambda x: x[0], update_info)
+        self.critic_train_state = critic_train_state_single
+        self.Vh_train_state = Vh_train_state_single
+        self.policy_train_state = policy_train_state_single
         if self.use_prev_init:
-            self.memory = rollouts
-        return update_info
+            self.memory = rollout_single
+        return update_info_single
 
     @ft.partial(jax.pmap, in_axes=(None, None, None, None, 0, None), axis_name='n_gpu', static_broadcasted_argnums=(0,))
     def pmap_update(self,
