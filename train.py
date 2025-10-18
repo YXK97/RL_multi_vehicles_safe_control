@@ -1,6 +1,8 @@
 import argparse
 import datetime
 import os
+# 设置可用GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import ipdb
 import numpy as np
 import wandb
@@ -17,8 +19,8 @@ def train(args):
     print(f"> Using {args.n_gpu} devices")
 
     # set up environment variables and seed
-    os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
-    os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+    # os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
+    # os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if args.debug:
         os.environ["WANDB_MODE"] = "disabled"
