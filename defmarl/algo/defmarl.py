@@ -602,9 +602,9 @@ class DefMARL(Algorithm):
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
         if params_to_save is not None:
-            pickle.dump(params_to_save.policy_train_state.params, open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
-            pickle.dump(params_to_save.critic_train_state.params, open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
-            pickle.dump(params_to_save.Vh_train_state.params, open(os.path.join(model_dir, 'Vh.pkl'), 'wb'))
+            pickle.dump(params_to_save['policy'], open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
+            pickle.dump(params_to_save['Vl'], open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
+            pickle.dump(params_to_save['Vh'], open(os.path.join(model_dir, 'Vh.pkl'), 'wb'))
         else:
             pickle.dump(self.policy_train_state.params, open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
             pickle.dump(self.critic_train_state.params, open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
