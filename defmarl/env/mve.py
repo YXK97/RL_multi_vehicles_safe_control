@@ -492,7 +492,7 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
     def get_graph(self, env_state: MVEEnvState, obst_as_agent:bool = False) -> MVEEnvGraphsTuple:
         num_agents = env_state.agent.shape[0]
         num_goals = env_state.goal.shape[0]
-        num_obsts = env_state.obstacle.shape[0] # 可为0
+        num_obsts = env_state.obstacle.shape[0] # TODO: 为0时报错，但理论上可以为0
         assert num_agents > 0 and num_goals > 0, "至少需要设定agent和goal!"
         assert num_agents == num_goals, "每一个agent对应一个goal"
         # node features
