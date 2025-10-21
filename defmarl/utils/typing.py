@@ -32,6 +32,7 @@ Pos2d = Float[Array, '2'] | Float[ndarray, '2']
 Pos3d = Float[Array, '3'] | Float[ndarray, '3']
 Pos = Pos2d | Pos3d
 Radius = Float[Array, ''] | float
+Path = Float[Array, 'curve_order_plus_1']
 
 
 # neural network types
