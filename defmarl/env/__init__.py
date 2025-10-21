@@ -8,7 +8,7 @@ from .mpe_formation import MPEFormation
 from .mpe_corridor import MPECorridor
 from .mpe_connect_spread import MPEConnectSpread
 from .mve_dist_measure_target import MVEDistMeasureTarget
-
+from .mve_pathtracking import MVEPathTracking
 
 ENV = {
     'MPETarget': MPETarget,
@@ -18,6 +18,7 @@ ENV = {
     'MPECorridor': MPECorridor,
     'MPEConnectSpread': MPEConnectSpread,
     'MVEDistMTarget': MVEDistMeasureTarget,
+    'MVEPathTracking': MVEPathTracking,
 }
 
 
