@@ -336,6 +336,7 @@ class DefMARL(Algorithm):
         action, log_pi, rnn_state = self.policy_train_state.apply_fn(params["policy"], graph, rnn_state, key, z)
         return action, log_pi, rnn_state
 
+    @ft.partial(jax.pmap, in_axes=(None, None, 0), axis_name='n_gpu', static_broadcasted_argnums=(0,))
     def collect(self, params: Params, b_key: PRNGKey) -> Rollout:
         if not self.use_prev_init or self.memory is None:
             rollout_result = self.rollout_fn(params, b_key)
@@ -349,10 +350,34 @@ class DefMARL(Algorithm):
             rollout_result = self.rollout_fn(params, rollout_key, init_graphs)
             return rollout_result
 
-    def update(self, rollout: Rollout, step: int) -> dict:
-        key, self.key = jr.split(self.key)
+    def update(self, rollouts: Rollout, step: int) -> dict:
+        _, self.key = jr.split(self.key)
+        critic_train_state, Vh_train_state, policy_train_state, update_info = self.pmap_update(
+            self.critic_train_state,
+            self.Vh_train_state,
+            self.policy_train_state,
+            rollouts,
+            step
+        )
+        critic_train_state_single = jtu.tree_map(lambda x: x[0], critic_train_state)
+        Vh_train_state_single = jtu.tree_map(lambda x: x[0], Vh_train_state)
+        policy_train_state_single = jtu.tree_map(lambda x: x[0], policy_train_state)
+        rollout_single = jtu.tree_map(lambda x: x[0], rollouts)
+        update_info_single = jtu.tree_map(lambda x: x[0], update_info)
+        self.critic_train_state = critic_train_state_single
+        self.Vh_train_state = Vh_train_state_single
+        self.policy_train_state = policy_train_state_single
+        if self.use_prev_init:
+            self.memory = rollout_single
+        return update_info_single
 
-        update_info = {}
+    @ft.partial(jax.pmap, in_axes=(None, None, None, None, 0, None), axis_name='n_gpu', static_broadcasted_argnums=(0,))
+    def pmap_update(self,
+                    critic_train_state: TrainState,
+                    Vh_train_state: TrainState,
+                    policy_train_state: TrainState,
+                    rollout: Rollout,
+                    step: int):
         assert rollout.dones.shape[0] * rollout.dones.shape[1] >= self.batch_size
         for i_epoch in range(self.epoch_ppo):
             idx = np.arange(rollout.dones.shape[0])
@@ -361,19 +386,14 @@ class DefMARL(Algorithm):
             rnn_chunk_ids = jnp.array(jnp.array_split(rnn_chunk_ids, rollout.dones.shape[1] // self.rnn_step))
             batch_idx = jnp.array(jnp.array_split(idx, idx.shape[0] // (self.batch_size // rollout.dones.shape[1])))
             critic_train_state, Vh_train_state, policy_train_state, update_info = self.update_inner(
-                self.critic_train_state,
-                self.Vh_train_state,
-                self.policy_train_state,
+                critic_train_state,
+                Vh_train_state,
+                policy_train_state,
                 rollout,
                 batch_idx,
                 rnn_chunk_ids
             )
-            self.critic_train_state = critic_train_state
-            self.policy_train_state = policy_train_state
-            self.Vh_train_state = Vh_train_state
-        if self.use_prev_init:
-            self.memory = rollout
-        return update_info
+        return critic_train_state, Vh_train_state, policy_train_state, update_info
 
     def scan_value(
             self,
@@ -465,7 +485,7 @@ class DefMARL(Algorithm):
         )
 
         # get training info of the last PPO epoch
-        info = jtu.tree_map(lambda x: x[-1], info)
+        info = jtu.tree_map(lambda x: jax.lax.pmean(x[-1], axis_name='n_gpu'), info)
 
         return critic_train_state, Vh_train_state, policy_train_state, info
 
@@ -512,10 +532,10 @@ class DefMARL(Algorithm):
             loss_policy1 = bcTa_ratio * bcTa_A
             loss_policy2 = jnp.clip(bcTa_ratio, 1 - self.clip_eps, 1 + self.clip_eps) * bcTa_A
             clip_frac = jnp.mean(loss_policy2 > loss_policy1)
-            loss_policy = jnp.maximum(loss_policy1, loss_policy2).mean()
-            mean_entropy = bcTa_entropy.mean()
+            loss_policy = jax.lax.pmean(jnp.maximum(loss_policy1, loss_policy2).mean(), axis_name='n_gpu')
+            mean_entropy = jax.lax.pmean(bcTa_entropy.mean(), axis_name='n_gpu')
             policy_loss = loss_policy - self.coef_ent * mean_entropy
-            total_variation_dist = 0.5 * jnp.mean(jnp.abs(bcTa_ratio - 1.0))
+            total_variation_dist = jax.lax.pmean(0.5 * jnp.mean(jnp.abs(bcTa_ratio - 1.0)), axis_name='n_gpu')
             info = {
                 'policy/loss': loss_policy,
                 'policy/entropy': mean_entropy,
@@ -525,7 +545,7 @@ class DefMARL(Algorithm):
             return policy_loss, info
 
         grad, policy_info = jax.grad(get_loss, has_aux=True)(policy_train_state.params)
-        grad_has_nan = has_any_nan_or_inf(grad).astype(jnp.float32)
+        grad_has_nan = (jax.lax.psum(has_any_nan_or_inf(grad).astype(jnp.float32), axis_name='n_gpu') > 0).astype(jnp.float32)
         grad, grad_norm = compute_norm_and_clip(grad, self.max_grad_norm)
         policy_train_state = policy_train_state.apply_gradients(grads=grad)
 
@@ -553,19 +573,20 @@ class DefMARL(Algorithm):
                 ft.partial(self.scan_value, critic_params=critic_params, Vh_params=Vh_params)))(
                 bcT_rollout, Vl_rnn_state_inits, Vh_rnn_state_inits
             )
-            loss_Vl = optax.l2_loss(bcT_Vl, bcT_Ql).mean()
-            loss_Vh = optax.l2_loss(bcTah_Vh, bcTah_Qh).mean()
+            loss_Vl = jax.lax.pmean(optax.l2_loss(bcT_Vl, bcT_Ql).mean(), axis_name='n_gpu')
+            loss_Vh = jax.lax.pmean(optax.l2_loss(bcTah_Vh, bcTah_Qh).mean(), axis_name='n_gpu')
+            gt_unsafe = jax.lax.pmean((bcTah_Qh > 1e-6).mean(), axis_name='n_gpu')
             info = {
                 'critic/loss': loss_Vl,
                 'critic/loss_Vh': loss_Vh,
-                'critic/gt_unsafe': (bcTah_Qh > 0).mean()
+                'critic/gt_unsafe': gt_unsafe
             }
             return loss_Vl + loss_Vh, info
 
         (grad_Vl, grad_Vh), value_info = jax.grad(get_loss, argnums=(0, 1), has_aux=True)(
             critic_train_state.params, Vh_train_state.params)
-        grad_Vl_has_nan = has_any_nan_or_inf(grad_Vl).astype(jnp.float32)
-        grad_Vh_has_nan = has_any_nan_or_inf(grad_Vh).astype(jnp.float32)
+        grad_Vl_has_nan = (jax.lax.psum(has_any_nan_or_inf(grad_Vl).astype(jnp.float32), axis_name='n_gpu') > 0).astype(jnp.float32)
+        grad_Vh_has_nan = (jax.lax.psum(has_any_nan_or_inf(grad_Vh).astype(jnp.float32), axis_name='n_gpu') > 0).astype(jnp.float32)
         grad_Vl, grad_Vl_norm = compute_norm_and_clip(grad_Vl, self.max_grad_norm)
         grad_Vh, grad_Vh_norm = compute_norm_and_clip(grad_Vh, self.max_grad_norm)
         critic_train_state = critic_train_state.apply_gradients(grads=grad_Vl)
@@ -576,13 +597,18 @@ class DefMARL(Algorithm):
                                                                   'critic/grad_norm': grad_Vl_norm,
                                                                   'critic/grad_Vh_norm': grad_Vh_norm})
 
-    def save(self, save_dir: str, step: int):
+    def save(self, save_dir: str, step: int, params_to_save: dict = None):
         model_dir = os.path.join(save_dir, str(step))
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
-        pickle.dump(self.policy_train_state.params, open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
-        pickle.dump(self.critic_train_state.params, open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
-        pickle.dump(self.Vh_train_state.params, open(os.path.join(model_dir, 'Vh.pkl'), 'wb'))
+        if params_to_save is not None:
+            pickle.dump(params_to_save['policy'], open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
+            pickle.dump(params_to_save['Vl'], open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
+            pickle.dump(params_to_save['Vh'], open(os.path.join(model_dir, 'Vh.pkl'), 'wb'))
+        else:
+            pickle.dump(self.policy_train_state.params, open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
+            pickle.dump(self.critic_train_state.params, open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
+            pickle.dump(self.Vh_train_state.params, open(os.path.join(model_dir, 'Vh.pkl'), 'wb'))
 
     def load(self, load_dir: str, step: int):
         path = os.path.join(load_dir, str(step))

@@ -71,7 +71,7 @@ def rollout(
     return rollout_data
 
 
-def test_rollout(
+def eval_rollout(
         env: MultiAgentEnv,
         actor: Callable,
         init_actor_rnn_state: Array,
@@ -152,7 +152,7 @@ def np2jax(x):
 
 def is_connected():
     try:
-        sock = socket.create_connection(("www.google.com", 80))
+        sock = socket.create_connection(("www.wand.ai", 80))
         if sock is not None:
             sock.close()
         return True

@@ -13,7 +13,7 @@ import yaml
 from defmarl.algo import make_algo
 from defmarl.env import make_env
 from defmarl.trainer.data import Rollout
-from defmarl.trainer.utils import test_rollout
+from defmarl.trainer.utils import eval_rollout
 from defmarl.utils.utils import jax_jit_np, jax_vmap
 
 
@@ -104,7 +104,7 @@ def test(args):
     test_keys = jr.split(test_key, 1_000)[: args.epi]
     test_keys = test_keys[args.offset:]
 
-    rollout_fn = ft.partial(test_rollout,
+    rollout_fn = ft.partial(eval_rollout,
                             env,
                             act_fn,
                             init_rnn_state,

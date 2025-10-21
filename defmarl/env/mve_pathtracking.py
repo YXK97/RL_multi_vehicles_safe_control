@@ -1,61 +1,41 @@
 import pathlib
 import jax
-import jax.numpy as jnp
 import jax.random as jr
-import numpy as np
+import jax.numpy as jnp
 import functools as ft
+import numpy as np
 
-from typing import NamedTuple, Tuple, Optional
-from abc import ABC, abstractmethod, abstractproperty
-
+from typing import Optional, Tuple
+from typing_extensions import override
 from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
 
-from jax.lax import dynamic_slice_in_dim
-
 from ..trainer.data import Rollout
 from ..utils.graph import EdgeBlock, GetGraph, GraphsTuple
-from ..utils.typing import Action, Array, Cost, Done, Info, Reward, State, AgentState
+from ..utils.typing import Action, Reward, Cost, Array, State, Path
 from ..utils.utils import tree_index, MutablePatchCollection, save_anim
-from .base import MultiAgentEnv
+from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
 
 
-class MVEEnvState(NamedTuple): # Multi Vehicles Environment
-    agent: State
-    goal: State
-    obstacle: State
-
-    @property
-    def n_agent(self) -> int:
-        return self.agent.shape[0]
-
-
-MVEEnvGraphsTuple = GraphsTuple[State, MVEEnvState]
-
-
-class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
-    """暂时只能设置为所有ego都使用一种模型，所有obst都使用一种模型"""
-
-    AGENT = 0
-    GOAL = 1
-    OBST = 2
+class MVEPathTracking(MVE):
+    """该任务使用直线距离作为agent to goal的reward的度量，scaling factor作为cost的度量，每个agent分配一个goal并规划出一条轨迹（五次多项式）"""
 
     PARAMS = {
         "ego_lf": 0.905, # m
         "ego_lr": 1.305, # m
-        "ego_bb_size": jnp.array([2.21, 1.48]), # bounding box的[width, height] m # TODO
+        "ego_bb_size": jnp.array([2.21, 1.48]), # bounding box的[width, height] m
         "comm_radius": 30,
         "n_obsts": 1,
-        "obst_bb_size": jnp.array([4.18, 1.99]), # bounding box的[width, height] m # TODO
+        "obst_bb_size": jnp.array([4.18, 1.99]), # bounding box的[width, height] m
         "collide_extra_bias": 0.1, # 用于计算cost时避碰的margin m
 
         "default_state_range": jnp.array([-35., 35., -9., 9., 0., 360., -5., 30.]), # [x_l, x_u, y_l, y_u, theta_l, theta_u, v_l, v_u]
         "rollout_state_range": jnp.array([-35., 35., -9., 9., 0., 360., -5., 30.]), # rollout过程中xy坐标和theta的限制
-        #"agent_init_state_range": jnp.array([25., 35., -7., 7.5, 150., 210., 0., 0.]), # 用于agent初始化的状态范围
-        #"goal_state_range": jnp.array([-30., -20., -6., 6., 180., 180., 0., 0.]), # 随机生成goal时的状态范围
-        #"obst_state_range": jnp.array([-15., 20., -7., 7.5, 0., 360., 0., 0.]), # 随机生成obstacle的状态范围
+        "agent_init_state_range": jnp.array([25., 33., -7., 7., 150., 210., 0., 0.]), # 用于agent初始化的状态范围
+        "goal_state_range": jnp.array([-33., -25., -7., 7., 150., 210., 0., 0.]), # 随机生成goal时的状态范围
+        "obst_state_range": jnp.array([-20., 20., -6., 6., 150., 210., 0., 0.]), # 随机生成obstacle的状态范围
 
         "dist2goal_bias": 0.1, # 用于判断agent是否到达goal m
 
@@ -69,56 +49,31 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         assert "obst_bb_size" in PARAMS and PARAMS["obst_bb_size"].shape == (2,)
     PARAMS.update({"obst_radius": jnp.linalg.norm(PARAMS["obst_bb_size"]/2)})
 
-    def __init__(
-            self,
-            num_agents: int,
-            area_size: Optional[float] = None,
-            max_step: int = 1280,
-            max_travel: Optional[float] = None,
-            dt: float = 0.05,
-            params: dict = None
-    ):
-        area_size = MVE.PARAMS["default_state_range"][:4] if area_size is None else area_size
-        params = MVE.PARAMS if params is None else params
-        super(MVE, self).__init__(num_agents, area_size, max_step, max_travel, dt, params)
+    def __init__(self,
+                 num_agents: int,
+                 area_size: Optional[float] = None,
+                 max_step: int = 1024,
+                 max_travel: Optional[float] = None,
+                 dt: float = 0.05,
+                 params: dict = None
+                 ):
+        params = MVEPathTracking.PARAMS if params is None else params
+        super(MVEPathTracking, self).__init__(num_agents, area_size, max_step, max_travel, dt, params)
 
-    @property
-    def state_dim(self) -> int:
-        return 4  # x:车辆x轴坐标（m）、y:车辆y轴坐标（m）、theta:车辆航向角（与x轴正向夹角，逆时针为正，degree）、v:质心速率（m/s）
-
+    @override
     @property
     def node_dim(self) -> int:
-        return 9  # state dim (4) + bb_size(2) + indicator(3): agent: 001, goal: 010, obstacle: 100, pad: 00-1
+        return 15  # state dim (4) + bb_size(2) + path_coeffs(6) + indicator(3): agent: 001, goal: 010, obstacle: 100, pad: 00-1
 
     @property
-    def edge_dim(self) -> int:
-        return 4  # state_diff: x_diff, y_diff, theta_diff, v_diff
-
-    @property
-    def action_dim(self) -> int:
-        return 2  # v:车辆质心速率（m/s）、delta:前轮转角（前轮与车辆中轴线正方向的夹角，逆时针为正，角度）
-
-    @abstractproperty
     def reward_min(self) -> float:
-        pass
+        return -(jnp.linalg.norm(jnp.array([self.area_size[jnp.array([0, 2])] - self.area_size[jnp.array([1, 3])]])) * 0.01) * self.max_episode_steps
 
-    @property
-    def reward_max(self) -> float:
-        return 0.5 # TODO，貌似可以
-
-    @property
-    def n_cost(self) -> int:
-        #return 6 # agent间碰撞(1) + agent-obstacle碰撞(1) + agent超出x轴范围(高+低，2) + agent超出y轴范围(高+低，2)
-        return 2 # agent间碰撞(1) + agent-obstacle碰撞(1)
-
-    @property
-    def cost_components(self) -> Tuple[str, ...]:
-        return "agent collisions", "obs collisions", "bound exceeds x low", "bound exceeds x high", \
-                "bound exceeds y low", "bound exceeds y high"
-
+    @override
     def reset(self, key: Array) -> GraphsTuple:
         """先生成obstacle，将obstacle视为agent，通过cost计算是否valid
-        再生成agent和goal，将之前生成的obstacle还原为obstacle，利用cost计算是否valid"""
+        再生成agent和goal，将之前生成的obstacle还原为obstacle，利用cost计算是否valid
+        最后使用五次多项式拟合初始路径"""
         state_low_idx = jnp.array([0,2,4])
         state_high_idx = jnp.array([1,3,5])
 
@@ -206,59 +161,112 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
 
         env_state = MVEEnvState(agents, goals, obsts)
 
-        return self.get_graph(env_state)
+        return self.get_graph_init_path(env_state)
 
-    def agent_step_euler(self, agent_states: AgentState, action: Action) -> AgentState:
-        assert action.shape == (self.num_agents, self.action_dim)
-        assert agent_states.shape == (self.num_agents, self.state_dim)
-
-        # 车辆自行车运动学模型
-        xs = agent_states[:, 0] # m
-        ys = agent_states[:, 1] # m
-        thetas = agent_states[:, 2] # degree
-        action_vs = action[:, 0] # km/h
-        action_deltas = action[:, 1] # degree
-        betas = jnp.atan(self.params["ego_lr"] * jnp.tan(action_deltas * jnp.pi / 180) / self.params["ego_L"])
-        new_xs = xs + action_vs / 3.6 * jnp.cos(thetas * jnp.pi / 180 + betas) * self.dt
-        new_ys = ys + action_vs / 3.6 * jnp.sin(thetas * jnp.pi / 180 + betas) * self.dt
-        new_thetas = (thetas + action_vs / 3.6 * jnp.cos(betas) * jnp.tan(action_deltas * jnp.pi / 180)
-                      / self.params["ego_L"] * self.dt * 180 / jnp.pi) % 360 # 将所有角度归一到[0, 360)上
-
-        n_state_agent_new = jnp.concatenate([new_xs[:, None], new_ys[:, None], new_thetas[:, None], action_vs[:, None]], axis=1)
-        assert n_state_agent_new.shape == (self.num_agents, self.state_dim)
-        return self.clip_state(n_state_agent_new)
-
-    def step(
-            self, graph: MVEEnvGraphsTuple, action: Action, get_eval_info: bool = False
-    ) -> Tuple[MVEEnvGraphsTuple, Reward, Cost, Done, Info]:
-        # get information from graph
-        agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=self.num_agents)
-        goals = graph.type_states(type_idx=MVE.GOAL, n_type=self.num_agents)
-        obstacles = graph.type_states(type_idx=MVE.OBST, n_type=self.params["n_obsts"]) if self.params["n_obsts"] > 0 else None
-
-        # calculate next graph
-        action = self.transform_action(action)
-        next_agent_states = self.agent_step_euler(agent_states, action)
-        next_env_state = MVEEnvState(next_agent_states, goals, obstacles)
-        info = {}
-
-        # the episode ends when reaching max_episode_steps
-        done = jnp.array(False)
-
-        # calculate reward and cost
-        reward = self.get_reward(graph, action)
-        cost = self.get_cost(graph)
-
-        return self.get_graph(next_env_state), reward, cost, done, info
-
-    @abstractmethod
     def get_reward(self, graph: MVEEnvGraphsTuple, action: Action) -> Reward:
-        pass
+        num_agents = graph.env_states.agent.shape[0]
+        num_goals = graph.env_states.goal.shape[0]
+        assert num_agents == num_goals
+        num_obsts = graph.env_states.obstacle.shape[0]
 
-    @abstractmethod
+        agents_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
+        goals_states = graph.type_states(type_idx=MVE.GOAL, n_type=num_goals)
+        agents_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
+        reward = jnp.zeros(()).astype(jnp.float32)
+
+        # goal distance reward
+        agents_pos = agents_states[:, :2]
+        goals_pos = goals_states[:, :2]
+        dist2goals = jnp.linalg.norm(goals_pos - agents_pos, axis=-1)
+        reward -= (dist2goals.mean()) * 0.01
+        # not reaching goal reward
+        reward -= jnp.where(dist2goals > self.params["dist2goal_bias"], 1.0, 0.0).mean() * 0.03
+
+        # 循迹奖励： 位置+角度
+        # 位置奖励
+        x = agents_pos[:, 0]
+        zeros = jnp.zeros_like(x)
+        ones = jnp.ones_like(x)
+        paths: Array[Path] = agents_nodes[:, 6:12]
+        paths_y = (jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
+            paths, jnp.stack([ones, x, x**2, x**3, x**4, x**5], axis=1)))
+        paths_pos = jnp.stack([x, paths_y], axis=1)
+        dist2paths = jnp.linalg.norm(paths_pos - agents_pos, axis=-1)
+        reward -= (dist2paths.mean()) * 0.005
+        # 角度奖励
+        agents_theta_grad = agents_states[:, 2] * jnp.pi / 180
+        agents_vec = jnp.concatenate([jnp.cos(agents_theta_grad)[:, None], jnp.sin(agents_theta_grad)[:, None]], axis=1)
+        paths_derivative = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
+            paths, jnp.stack([zeros, ones, 2*x, 3*x**2, 4*x**3, 5*x**4], axis=1))
+        paths_theta = jnp.atan(paths_derivative)
+        paths_vec = jnp.concatenate([jnp.cos(paths_theta)[:, None], jnp.sin(paths_theta)[:, None]], axis=1)
+        theta2paths = jnp.einsum('ij,ij->i', agents_vec, paths_vec)
+        reward += (theta2paths.mean() - 1) * 0.0002
+
+        # 速率一致性奖励
+        reward -= (jnp.abs(action[:, 0] - agents_states[:, -1])).mean() * 0.0001
+
+        return reward
+
     def get_cost(self, graph: MVEEnvGraphsTuple) -> Cost:
-        pass
+        num_agents = graph.env_states.agent.shape[0]
+        num_goals = graph.env_states.goal.shape[0]
+        assert num_agents == num_goals
+        num_obsts = graph.env_states.obstacle.shape[0]
 
+        agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
+        obstacle_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
+
+        agent_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
+        agent_radius = jnp.linalg.norm(agent_nodes[0, 4:6] / 2)
+        if num_obsts > 0:
+            obstacle_nodes = graph.type_nodes(type_idx=MVE.OBST, n_type=num_obsts)
+            obst_radius = jnp.linalg.norm(obstacle_nodes[0, 4:6] / 2)
+
+        # collision between agents
+        agent_pos = agent_states[:, :2]
+        dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1)
+        dist += jnp.eye(num_agents) * 1e6
+        min_dist = jnp.min(dist, axis=1)
+        agent_cost: Array = agent_radius * 2 + self.params["collide_extra_bias"] - min_dist
+
+        # collision between agents and obstacles
+        if num_obsts == 0:
+            obst_cost = -jnp.ones(num_agents)
+        else:
+            obstacle_pos = obstacle_states[:, :2]
+            dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(obstacle_pos, 0), axis=-1)
+            min_dist = jnp.min(dist, axis=1)
+            obst_cost: Array = agent_radius + obst_radius + self.params["collide_extra_bias"] - min_dist
+
+        """
+        # 对于agent是否超出边界的判断
+        if "rollout_state_range" in self.params and self.params["rollout_state_range"] is not None:
+            rollout_state_range = self.params["rollout_state_range"]
+        else:
+            rollout_state_range = self.params["default_state_range"]
+        agent_bound_cost_xl = rollout_state_range[0] - agent_pos[:, 0]
+        agent_bound_cost_xh = -(rollout_state_range[1] - agent_pos[:, 0])
+        agent_bound_cost_yl = rollout_state_range[2] - agent_pos[:, 1]
+        agent_bound_cost_yh = -(rollout_state_range[3] - agent_pos[:, 1])
+        agent_bound_cost = jnp.concatenate([agent_bound_cost_xl[:, None], agent_bound_cost_xh[:, None],
+                                            agent_bound_cost_yl[:, None], agent_bound_cost_yh[:, None]], axis=1)
+
+        cost = jnp.concatenate([agent_cost[:, None], obst_cost[:, None], agent_bound_cost], axis=1)
+        assert cost.shape == (num_agents, self.n_cost)
+        """
+
+        cost = jnp.concatenate([agent_cost[:, None], obst_cost[:, None]], axis=1)
+        assert cost.shape == (num_agents, self.n_cost)
+
+        # add margin
+        eps = 0.5
+        cost = jnp.where(cost <= 0.0, cost - eps, cost + eps)
+        cost = jnp.clip(cost, a_min=-1.0)
+
+        return cost
+
+    @override
     def render_video(
             self,
             rollout: Rollout,
@@ -284,6 +292,10 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         # 画y轴方向的限制，即车道边界限制
         ax.axhline(y=self.area_size[2], linewidth=2, color='k')
         ax.axhline(y=self.area_size[3], linewidth=2, color='k')
+
+        # 画x轴方向的限制
+        ax.axvline(x=self.area_size[0], linewidth=2, color='k')
+        ax.axvline(x=self.area_size[1], linewidth=2, color='k')
 
         # plot the first frame
         T_graph = rollout.graph
@@ -335,7 +347,8 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         ax.add_collection(col_goals)
 
         # plot agents
-        agents_state_bbsize = graph0.type_nodes(type_idx=MVE.AGENT, n_type=self.num_agents)[:, :6]
+        agents_node = graph0.type_nodes(type_idx=MVE.AGENT, n_type=self.num_agents)
+        agents_state_bbsize = agents_node[:, :6]
         agents_pos = agents_state_bbsize[:, :2]
         agents_theta = agents_state_bbsize[:, 2]
         agents_bb_size = agents_state_bbsize[:, 4:6]
@@ -353,6 +366,18 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
                                       color=agent_color, linewidth=0.0, alpha=0.3) for i in range(self.num_agents)]
         col_agents = MutablePatchCollection(plot_agents_arrow+plot_agents_rec+plot_agents_cir, match_original=True, zorder=7)
         ax.add_collection(col_agents)
+
+        # 画出agent的五次多项式path
+        agents_path = agents_node[:, 6:12]
+        a_xs = jax.vmap(lambda xl, xh: jnp.linspace(xl, xh, 100), in_axes=(0, 0))(agents_pos[:, 0], goals_pos[:, 0])
+        ones = jnp.ones_like(a_xs)
+        a_X = jnp.stack([ones, a_xs, a_xs**2, a_xs**3, a_xs**4, a_xs**5], axis=1)
+        a_ys = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(agents_path, a_X)
+        path_lines = []
+        for xs, ys in zip(a_xs, a_ys):
+            path_lines.append(np.column_stack([xs, ys]))
+        path_collection = LineCollection(path_lines, colors='k',  linewidths=1.5, linestyles='--', alpha = 1.0, zorder=8)
+        ax.add_collection(path_collection)
 
         # plot edges
         all_pos = graph0.states[:, :2]
@@ -485,11 +510,71 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         ani = FuncAnimation(fig, update, frames=anim_T, init_func=init_fn, interval=mspf, blit=True)
         save_anim(ani, video_path)
 
-    @abstractmethod
     def edge_blocks(self, state: MVEEnvState) -> list[EdgeBlock]:
-        pass
+        num_agents = state.agent.shape[0]
+        num_goals = state.goal.shape[0]
+        assert num_agents == num_goals
+        num_obsts = state.obstacle.shape[0]
 
-    def get_graph(self, env_state: MVEEnvState, obst_as_agent:bool = False) -> MVEEnvGraphsTuple:
+        agent_pos = state.agent[:, :2]
+        id_agent = jnp.arange(num_agents)
+
+        # agent - agent connection
+        pos_diff = agent_pos[:, None, :] - agent_pos[None, :, :]  # [i, j]: i -> j
+        state_diff = state.agent[:, None, :] - state.agent[None, :, :]
+        dist = jnp.linalg.norm(pos_diff, axis=-1)
+        dist += jnp.eye(dist.shape[1]) * (self.params["comm_radius"] + 1)
+        agent_agent_mask = jnp.less(dist, self.params["comm_radius"])
+        agent_agent_edges = EdgeBlock(state_diff, agent_agent_mask, id_agent, id_agent)
+
+        # agent - goal connection
+        agent_goal_edges = []
+        for i_agent in range(num_agents):
+            agent_state_i = state.agent[i_agent]
+            goal_state_i = state.goal[i_agent]
+            agent_goal_feats_i = agent_state_i - goal_state_i
+            agent_goal_edges.append(EdgeBlock(agent_goal_feats_i[None, None, :], jnp.ones((1, 1)),
+                                              jnp.array([i_agent]), jnp.array([i_agent + num_agents])))
+
+        # agent - obstacle connection
+        agent_obst_edges = []
+        if num_obsts > 0:
+            obs_pos = state.obstacle[:, :2]
+            poss_diff = agent_pos[:, None, :] - obs_pos[None, :, :]
+            dist = jnp.linalg.norm(poss_diff, axis=-1)
+            agent_obs_mask = jnp.less(dist, self.params["comm_radius"])
+            id_obs = jnp.arange(num_obsts) + num_agents * 2
+            state_diff = state.agent[:, None, :] - state.obstacle[None, :, :]
+            agent_obst_edges = [EdgeBlock(state_diff, agent_obs_mask, id_agent, id_obs)]
+
+        return [agent_agent_edges] + agent_goal_edges + agent_obst_edges
+        # return agent_goal_edges + agent_obst_edges
+
+    def generate_path(self, env_state: MVEEnvState) -> Path:
+        """根据起点和终点求解五次多项式并写入graph"""
+        agent_states = env_state.agent
+        goal_states = env_state.goal
+        @ft.partial(jax.jit)
+        def A_b_create_and_solve(agent_state, goal_state) -> Path:
+            x0 = agent_state[0]
+            x1 = goal_state[0]
+            A = jnp.array([[1, x0, x0**2,   x0**3,    x0**4,    x0**5],
+                           [0,  1,  2*x0, 3*x0**2,  4*x0**3,  5*x0**4],
+                           [0,  0,     2,    6*x0, 12*x0**2, 20*x0**3],
+                           [1, x1, x1**2,   x1**3,    x1**4,    x1**5],
+                           [0,  1,  2*x1, 3*x1**2,  4*x1**3,  5*x1**4],
+                           [0,  0,     2,    6*x1, 12*x1**2, 20*x1**3],])
+            y0 = agent_state[1]
+            y1 = goal_state[1]
+            t0 = agent_state[2]*jnp.pi/180
+            t1 = goal_state[2]*jnp.pi/180
+            b = jnp.array([y0, jnp.tan(t0), 0, y1, jnp.tan(t1), 0])
+            coeff = jnp.linalg.solve(A, b)
+            return coeff
+        coeffs = jax.vmap(A_b_create_and_solve, in_axes=(0, 0))(agent_states, goal_states)
+        return coeffs
+
+    def get_graph_init_path(self, env_state: MVEEnvState, obst_as_agent:bool = False) -> MVEEnvGraphsTuple:
         num_agents = env_state.agent.shape[0]
         num_goals = env_state.goal.shape[0]
         num_obsts = env_state.obstacle.shape[0] # TODO: 为0时报错，但理论上可以为0
@@ -511,11 +596,15 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
         if num_obsts > 0:
             node_feats = node_feats.at[num_agents + num_goals:, 4:6].set(self.params["obst_bb_size"])
 
+        # 对agent设置五次多项式路径规划
+        paths = self.generate_path(env_state)
+        node_feats = node_feats.at[:num_agents, 6:12].set(paths)
+
         # indicators
-        node_feats = node_feats.at[:num_agents, 8].set(1.0)
-        node_feats = node_feats.at[num_agents: num_agents + num_goals, 7].set(1.0)
+        node_feats = node_feats.at[:num_agents, 14].set(1.0)
+        node_feats = node_feats.at[num_agents: num_agents + num_goals, 13].set(1.0)
         if num_obsts > 0:
-            node_feats = node_feats.at[num_agents + num_goals:, 6].set(1.0)
+            node_feats = node_feats.at[num_agents + num_goals:, 12].set(1.0)
 
         # node type
         node_type = -jnp.ones((num_agents + num_goals + num_obsts), dtype=jnp.int32)
@@ -533,16 +622,14 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
             states = jnp.concatenate([states, env_state.obstacle], axis=0)
         return GetGraph(node_feats, node_type, edge_blocks, env_state, states).to_padded()
 
-    @abstractmethod
     def state_lim(self, state: Optional[State] = None) -> Tuple[State, State]:
-        pass
-
-    def action_lim(self) -> Tuple[Action, Action]:
-        lower_lim = jnp.array([-5., -30.])[None, :].repeat(self.num_agents, axis=0) # v(允许倒车), delta
-        upper_lim = jnp.array([30., 30.])[None, :].repeat(self.num_agents, axis=0)
+        lower_lim = self.params["rollout_state_range"][
+            jnp.array([0, 2, 4, 6])]  # + jnp.array([0,-3,0,0]) # y方向增加可行宽度（相当于增加护墙不让车跨越，让车学会不要超出道路限制）
+        upper_lim = self.params["rollout_state_range"][jnp.array([1, 3, 5, 7])]  # + jnp.array([0,3,0,0])
         return lower_lim, upper_lim
 
-    @ft.partial(jax.jit, static_argnums=(0,))
-    def unsafe_mask(self, graph: GraphsTuple) -> Array:
-        cost = self.get_cost(graph)
-        return jnp.any(cost >= 0.0, axis=-1)
+    @override
+    def action_lim(self) -> Tuple[Action, Action]:
+        lower_lim = jnp.array([0., -30.])[None, :].repeat(self.num_agents, axis=0) # v(只能直行), delta
+        upper_lim = jnp.array([30., 30.])[None, :].repeat(self.num_agents, axis=0)
+        return lower_lim, upper_lim
