@@ -14,13 +14,13 @@ from matplotlib.collections import LineCollection
 
 from ..trainer.data import Rollout
 from ..utils.graph import EdgeBlock, GetGraph, GraphsTuple
-from ..utils.typing import Action, Reward, Cost, Array, State, Path
+from ..utils.typing import Action, Reward, Cost, Array, State, Path, Done, Info
 from ..utils.utils import tree_index, MutablePatchCollection, save_anim
 from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
 
 
 class MVEPathTracking(MVE):
-    """该任务使用直线距离作为agent to goal的reward的度量，scaling factor作为cost的度量，每个agent分配一个goal并规划出一条轨迹（五次多项式）"""
+    """该任务使用循迹距离、方向误差和速度跟踪误差作为reward的度量，scaling factor作为cost的度量（未实现），每个agent分配一个goal并规划出一条轨迹（五次多项式）"""
 
     PARAMS = {
         "ego_lf": 0.905, # m
@@ -31,10 +31,10 @@ class MVEPathTracking(MVE):
         "obst_bb_size": jnp.array([4.18, 1.99]), # bounding box的[width, height] m
         "collide_extra_bias": 0.1, # 用于计算cost时避碰的margin m
 
-        "default_state_range": jnp.array([-35., 35., -9., 9., 0., 360., -5., 30.]), # [x_l, x_u, y_l, y_u, theta_l, theta_u, v_l, v_u]
-        "rollout_state_range": jnp.array([-35., 35., -9., 9., 0., 360., -5., 30.]), # rollout过程中xy坐标和theta的限制
+        "default_state_range": jnp.array([-35., 35., -9., 9., 0., 360., 0., 30.]), # [x_l, x_u, y_l, y_u, theta_l, theta_u, v_l, v_u]
+        "rollout_state_range": jnp.array([-35., 35., -9., 9., 0., 360., 0., 30.]), # rollout过程中xy坐标和theta的限制
         "agent_init_state_range": jnp.array([25., 33., -7., 7., 150., 210., 0., 0.]), # 用于agent初始化的状态范围
-        "goal_state_range": jnp.array([-33., -25., -7., 7., 150., 210., 0., 0.]), # 随机生成goal时的状态范围
+        "goal_state_range": jnp.array([-33., -25., -7., 7., 150., 210., 30., 30.]), # 随机生成goal时的状态范围，速度只作为目标速度
         "obst_state_range": jnp.array([-20., 20., -6., 6., 150., 210., 0., 0.]), # 随机生成obstacle的状态范围
 
         "dist2goal_bias": 0.1, # 用于判断agent是否到达goal m
@@ -52,7 +52,7 @@ class MVEPathTracking(MVE):
     def __init__(self,
                  num_agents: int,
                  area_size: Optional[float] = None,
-                 max_step: int = 1024,
+                 max_step: int = 128,
                  max_travel: Optional[float] = None,
                  dt: float = 0.05,
                  params: dict = None
@@ -67,15 +67,15 @@ class MVEPathTracking(MVE):
 
     @property
     def reward_min(self) -> float:
-        return -(jnp.linalg.norm(jnp.array([self.area_size[jnp.array([0, 2])] - self.area_size[jnp.array([1, 3])]])) * 0.01) * self.max_episode_steps
+        return -(jnp.abs(self.area_size[3] - self.area_size[2]) * 0.01) * self.max_episode_steps
 
     @override
     def reset(self, key: Array) -> GraphsTuple:
         """先生成obstacle，将obstacle视为agent，通过cost计算是否valid
         再生成agent和goal，将之前生成的obstacle还原为obstacle，利用cost计算是否valid
         最后使用五次多项式拟合初始路径"""
-        state_low_idx = jnp.array([0,2,4])
-        state_high_idx = jnp.array([1,3,5])
+        state_low_idx = jnp.array([0,2,4,6])
+        state_high_idx = jnp.array([1,3,5,7])
 
         if self.params["n_obsts"] > 0:
             # randomly generate obstacles
@@ -84,15 +84,16 @@ class MVEPathTracking(MVE):
                 use_key, this_key = jr.split(this_key, 2)
                 return this_key, state_range, \
                         jr.uniform(use_key, (self.params["n_obsts"], self.state_dim),
-                            minval=jnp.concatenate([obst_state_range[state_low_idx], jnp.zeros((1,))], axis=0),
-                            maxval=jnp.concatenate([obst_state_range[state_high_idx], jnp.zeros((1,))], axis=0))
+                            minval=obst_state_range[state_low_idx],
+                            maxval=obst_state_range[state_high_idx])
 
             def non_valid_obst(inp):
                 "根据cost判断是否valid"
                 _, _, this_candidates = inp
                 empty_obsts = jnp.empty((0, self.state_dim))
                 tmp_state = MVEEnvState(this_candidates, this_candidates, empty_obsts)
-                tmp_graph = self.get_graph(tmp_state, obst_as_agent=True)
+                paths = jnp.zeros((this_candidates.shape[0], 6))
+                tmp_graph = self.get_graph(tmp_state, paths, obst_as_agent=True)
                 cost = self.get_cost(tmp_graph)
                 return jnp.max(cost) > -0.5
 
@@ -100,8 +101,8 @@ class MVEPathTracking(MVE):
                 use_key, this_key = jr.split(key, 2)
                 # 速度均设置为0
                 obst_candidates = jr.uniform(use_key, (self.params["n_obsts"], self.state_dim),
-                                            minval=jnp.concatenate([state_range[state_low_idx], jnp.zeros((1,))], axis=0),
-                                            maxval=jnp.concatenate([state_range[state_high_idx], jnp.zeros((1,))], axis=0))
+                                            minval=state_range[state_low_idx],
+                                            maxval=state_range[state_high_idx])
                 _, _, valid_obsts = jax.lax.while_loop(non_valid_obst, get_obst, (this_key, state_range, obst_candidates))
                 return valid_obsts
 
@@ -120,15 +121,16 @@ class MVEPathTracking(MVE):
             use_key, this_key = jr.split(this_key, 2)
             return this_key, state_range,  \
                     jr.uniform(use_key, (self.num_agents, self.state_dim),
-                        minval=jnp.concatenate([state_range[state_low_idx], jnp.zeros((1,))], axis=0),
-                        maxval=jnp.concatenate([state_range[state_high_idx], jnp.zeros((1,))], axis=0)), \
+                        minval=state_range[state_low_idx],
+                        maxval=state_range[state_high_idx]), \
                     obsts
 
         def non_valid_agent_goal(inp):
             "根据cost判断是否valid"
             _, _, this_candidates, obsts = inp
             tmp_state = MVEEnvState(this_candidates, this_candidates, obsts)
-            tmp_graph = self.get_graph(tmp_state)
+            paths = jnp.zeros((this_candidates.shape[0], 6))
+            tmp_graph = self.get_graph(tmp_state, paths)
             cost = self.get_cost(tmp_graph)
             return jnp.max(cost) > -0.5
 
@@ -136,8 +138,8 @@ class MVEPathTracking(MVE):
             use_key, this_key = jr.split(key, 2)
             # 速度均设置为0
             target_candidates = jr.uniform(use_key, (self.num_agents, self.state_dim),
-                                        minval=jnp.concatenate([state_range[state_low_idx], jnp.zeros((1,))], axis=0),
-                                        maxval=jnp.concatenate([state_range[state_high_idx], jnp.zeros((1,))], axis=0))
+                                        minval=state_range[state_low_idx],
+                                        maxval=state_range[state_high_idx])
             _, _, valid_targets, _ = jax.lax.while_loop(non_valid_agent_goal, get_agent_goal,
                                     (this_key, state_range, target_candidates, obsts))
             return valid_targets
@@ -161,7 +163,36 @@ class MVEPathTracking(MVE):
 
         env_state = MVEEnvState(agents, goals, obsts)
 
-        return self.get_graph_init_path(env_state)
+        # 为初始agents规划五次多项式参考路径
+        paths_coeff = self.generate_path(env_state)
+
+        return self.get_graph(env_state, paths_coeff)
+
+    @override
+    def step(
+            self, graph: MVEEnvGraphsTuple, action: Action, get_eval_info: bool = False
+    ) -> Tuple[MVEEnvGraphsTuple, Reward, Cost, Done, Info]:
+        # get information from graph
+        agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=self.num_agents)
+        agent_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=self.num_agents)
+        goals = graph.type_states(type_idx=MVE.GOAL, n_type=self.num_agents)
+        obstacles = graph.type_states(type_idx=MVE.OBST, n_type=self.params["n_obsts"]) if self.params["n_obsts"] > 0 else None
+        paths_coeff = agent_nodes[:, 6:12]
+
+        # calculate next graph
+        action = self.transform_action(action)
+        next_agent_states = self.agent_step_euler(agent_states, action)
+        next_env_state = MVEEnvState(next_agent_states, goals, obstacles)
+        info = {}
+
+        # the episode ends when reaching max_episode_steps
+        done = jnp.array(False)
+
+        # calculate reward and cost
+        reward = self.get_reward(graph, action)
+        cost = self.get_cost(graph)
+
+        return self.get_graph(next_env_state, paths_coeff), reward, cost, done, info
 
     def get_reward(self, graph: MVEEnvGraphsTuple, action: Action) -> Reward:
         num_agents = graph.env_states.agent.shape[0]
@@ -174,34 +205,35 @@ class MVEPathTracking(MVE):
         agents_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
         reward = jnp.zeros(()).astype(jnp.float32)
 
-        # goal distance reward
-        agents_pos = agents_states[:, :2]
-        goals_pos = goals_states[:, :2]
-        dist2goals = jnp.linalg.norm(goals_pos - agents_pos, axis=-1)
-        reward -= (dist2goals.mean()) * 0.01
-        # not reaching goal reward
-        reward -= jnp.where(dist2goals > self.params["dist2goal_bias"], 1.0, 0.0).mean() * 0.03
-
         # 循迹奖励： 位置+角度
         # 位置奖励
-        x = agents_pos[:, 0]
+        x = agents_states[:, 0]
+        y = agents_states[:, 1]
         zeros = jnp.zeros_like(x)
         ones = jnp.ones_like(x)
         paths: Array[Path] = agents_nodes[:, 6:12]
+        # jax.debug.print("path coeff={coeff}", coeff=paths)
         paths_y = (jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
             paths, jnp.stack([ones, x, x**2, x**3, x**4, x**5], axis=1)))
-        paths_pos = jnp.stack([x, paths_y], axis=1)
-        dist2paths = jnp.linalg.norm(paths_pos - agents_pos, axis=-1)
-        reward -= (dist2paths.mean()) * 0.005
+        dist2paths = jnp.abs(paths_y - y)
+        # jax.debug.print("dist2paths={dist}", dist=dist2paths)
+        reward -= (dist2paths.mean()) * 0.01
+        reward -= jnp.where(dist2paths > self.params["dist2goal_bias"], 1.0, 0.0).mean() * 0.001
         # 角度奖励
         agents_theta_grad = agents_states[:, 2] * jnp.pi / 180
-        agents_vec = jnp.concatenate([jnp.cos(agents_theta_grad)[:, None], jnp.sin(agents_theta_grad)[:, None]], axis=1)
+        agents_vec = jnp.stack([jnp.cos(agents_theta_grad), jnp.sin(agents_theta_grad)], axis=1)
         paths_derivative = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
             paths, jnp.stack([zeros, ones, 2*x, 3*x**2, 4*x**3, 5*x**4], axis=1))
         paths_theta = jnp.atan(paths_derivative)
-        paths_vec = jnp.concatenate([jnp.cos(paths_theta)[:, None], jnp.sin(paths_theta)[:, None]], axis=1)
+        paths_vec = -jnp.stack([jnp.cos(paths_theta), jnp.sin(paths_theta)], axis=1) # 这里就只能处理车辆往x轴负方向运动的情况了
         theta2paths = jnp.einsum('ij,ij->i', agents_vec, paths_vec)
-        reward += (theta2paths.mean() - 1) * 0.0002
+        reward += (theta2paths.mean() - 1) * 0.002
+        reward -= jnp.where(theta2paths < self.params["theta2goal_bias"], 1.0, 0.0).mean() * 0.0002
+
+        # 速度跟踪奖励
+        v_goal = goals_states[:, 3]
+        v = agents_states[:, 3]
+        reward -= ((v_goal - v).mean()) * 0.001
 
         # 速率一致性奖励
         reward -= (jnp.abs(action[:, 0] - agents_states[:, -1])).mean() * 0.0001
@@ -326,26 +358,6 @@ class MVEPathTracking(MVE):
             col_obsts = MutablePatchCollection(plot_obsts_arrow+plot_obsts_rec+plot_obsts_cir, match_original=True, zorder=5)
             ax.add_collection(col_obsts)
 
-        # plot goals
-        goals_state_bbsize = graph0.type_nodes(type_idx=MVE.GOAL, n_type=n_goals)[:, :6]
-        goals_pos = goals_state_bbsize[:, :2]
-        goals_theta = goals_state_bbsize[:, 2]
-        goals_bb_size = goals_state_bbsize[:, 4:6]
-        goals_radius = jnp.linalg.norm(goals_bb_size, axis=1)
-        plot_goals_arrow = [plt.Arrow(x=goals_pos[i,0], y=goals_pos[i,1],
-                                      dx=jnp.cos(goals_theta[i]*jnp.pi/180)*goals_radius[i]/2,
-                                      dy=jnp.sin(goals_theta[i]*jnp.pi/180)*goals_radius[i]/2,
-                                      width=goals_radius[i]/jnp.mean(obsts_radius),
-                                      alpha=1.0, color=goal_color) for i in range(n_goals)]
-        plot_goals_rec = [plt.Rectangle(xy=tuple(goals_pos[i,:]-goals_bb_size[i,:]/2),
-                                        width=goals_bb_size[i,0], height=goals_bb_size[i,1],
-                                        angle=goals_theta[i], rotation_point='center',
-                                        color=goal_color, linewidth=0.0, alpha=0.6) for i in range(n_goals)]
-        plot_goals_cir = [plt.Circle(xy=(goals_pos[i,0], goals_pos[i,1]), radius=self.params["ego_radius"],
-                                     color=goal_color, linewidth=0.0, alpha=0.3) for i in range(n_goals)]
-        col_goals = MutablePatchCollection(plot_goals_arrow+plot_goals_rec+plot_goals_cir, match_original=True, zorder=6)
-        ax.add_collection(col_goals)
-
         # plot agents
         agents_node = graph0.type_nodes(type_idx=MVE.AGENT, n_type=self.num_agents)
         agents_state_bbsize = agents_node[:, :6]
@@ -364,10 +376,12 @@ class MVEPathTracking(MVE):
                                          color=agent_color, linewidth=0.0, alpha=0.6) for i in range(self.num_agents)]
         plot_agents_cir = [plt.Circle(xy=(agents_pos[i,0], agents_pos[i,1]), radius=self.params["ego_radius"],
                                       color=agent_color, linewidth=0.0, alpha=0.3) for i in range(self.num_agents)]
-        col_agents = MutablePatchCollection(plot_agents_arrow+plot_agents_rec+plot_agents_cir, match_original=True, zorder=7)
+        col_agents = MutablePatchCollection(plot_agents_arrow+plot_agents_rec+plot_agents_cir, match_original=True, zorder=6)
         ax.add_collection(col_agents)
 
         # 画出agent的五次多项式path
+        goals_state_bbsize = graph0.type_nodes(type_idx=MVE.GOAL, n_type=n_goals)[:, :6]
+        goals_pos = goals_state_bbsize[:, :2]
         agents_path = agents_node[:, 6:12]
         a_xs = jax.vmap(lambda xl, xh: jnp.linspace(xl, xh, 100), in_axes=(0, 0))(agents_pos[:, 0], goals_pos[:, 0])
         ones = jnp.ones_like(a_xs)
@@ -376,7 +390,7 @@ class MVEPathTracking(MVE):
         path_lines = []
         for xs, ys in zip(a_xs, a_ys):
             path_lines.append(np.column_stack([xs, ys]))
-        path_collection = LineCollection(path_lines, colors='k',  linewidths=1.5, linestyles='--', alpha = 1.0, zorder=8)
+        path_collection = LineCollection(path_lines, colors='k',  linewidths=1.5, linestyles='--', alpha = 1.0, zorder=7)
         ax.add_collection(path_collection)
 
         # plot edges
@@ -426,7 +440,7 @@ class MVEPathTracking(MVE):
 
         # init function for animation
         def init_fn() -> list[plt.Artist]:
-            return [col_obsts, col_goals, col_agents, col_edges, *agent_labels, cost_text, *safe_text, kk_text]
+            return [col_obsts, col_agents, col_edges, *agent_labels, cost_text, *safe_text, kk_text]
 
         def update(kk: int) -> list[plt.Artist]:
             graph = tree_index(T_graph, kk)
@@ -444,14 +458,6 @@ class MVEPathTracking(MVE):
                 plot_agents_rec[ii].set_angle(angle=n_theta_t[ii])
                 plot_agents_cir[ii].set_center(xy=tuple(n_pos_t[ii, :]))
                 agent_labels[ii].set_position(n_pos_t[ii, :])
-            # update goals' positions
-            for ii in range(n_goals):
-                plot_goals_arrow[ii].set_data(x=n_pos_t[self.num_agents+ii, 0], y=n_pos_t[self.num_agents+ii, 1],
-                                              dx=jnp.cos(n_theta_t[self.num_agents+ii]*jnp.pi/180)*n_radius[self.num_agents+ii]/2,
-                                              dy=jnp.sin(n_theta_t[self.num_agents+ii]*jnp.pi/180)*n_radius[self.num_agents+ii]/2)
-                plot_goals_rec[ii].set_xy(xy=tuple(n_pos_t[self.num_agents+ii, :]-n_bb_size_t[self.num_agents+ii, :]/2))
-                plot_goals_rec[ii].set_angle(angle=n_theta_t[self.num_agents+ii])
-                plot_goals_cir[ii].set_center(xy=tuple(n_pos_t[self.num_agents+ii, :]))
             # update obstacles' positions
             if self.params["n_obsts"] > 0:
                 for ii in range(self.params["n_obsts"]):
@@ -501,7 +507,7 @@ class MVEPathTracking(MVE):
             if "Vh" in viz_opts:
                 Vh_text.set_text(f"Vh: {viz_opts['Vh'][kk]}")
 
-            return [col_obsts, col_goals, col_agents, col_edges, *agent_labels, cost_text, *safe_text, kk_text]
+            return [col_obsts, col_agents, col_edges, *agent_labels, cost_text, *safe_text, kk_text]
 
         fps = 30.0
         spf = 1 / fps
@@ -574,7 +580,8 @@ class MVEPathTracking(MVE):
         coeffs = jax.vmap(A_b_create_and_solve, in_axes=(0, 0))(agent_states, goal_states)
         return coeffs
 
-    def get_graph_init_path(self, env_state: MVEEnvState, obst_as_agent:bool = False) -> MVEEnvGraphsTuple:
+    @override
+    def get_graph(self, env_state: MVEEnvState, paths: Path, obst_as_agent:bool = False) -> MVEEnvGraphsTuple:
         num_agents = env_state.agent.shape[0]
         num_goals = env_state.goal.shape[0]
         num_obsts = env_state.obstacle.shape[0] # TODO: 为0时报错，但理论上可以为0
@@ -597,7 +604,6 @@ class MVEPathTracking(MVE):
             node_feats = node_feats.at[num_agents + num_goals:, 4:6].set(self.params["obst_bb_size"])
 
         # 对agent设置五次多项式路径规划
-        paths = self.generate_path(env_state)
         node_feats = node_feats.at[:num_agents, 6:12].set(paths)
 
         # indicators
@@ -630,6 +636,6 @@ class MVEPathTracking(MVE):
 
     @override
     def action_lim(self) -> Tuple[Action, Action]:
-        lower_lim = jnp.array([0., -30.])[None, :].repeat(self.num_agents, axis=0) # v(只能直行), delta
+        lower_lim = jnp.array([0., -30.])[None, :].repeat(self.num_agents, axis=0) # v(不能倒车), delta
         upper_lim = jnp.array([30., 30.])[None, :].repeat(self.num_agents, axis=0)
         return lower_lim, upper_lim
