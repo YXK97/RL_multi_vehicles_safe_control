@@ -34,7 +34,7 @@ class MVEPathTracking(MVE):
         "default_state_range": jnp.array([-35., 35., -9., 9., 0., 360., 0., 30.]), # [x_l, x_u, y_l, y_u, theta_l, theta_u, v_l, v_u]
         "rollout_state_range": jnp.array([-35., 35., -9., 9., 0., 360., 0., 30.]), # rollout过程中xy坐标和theta的限制
         "agent_init_state_range": jnp.array([25., 33., -7., 7., 150., 210., 0., 0.]), # 用于agent初始化的状态范围
-        "goal_state_range": jnp.array([-33., -25., -7., 7., 150., 210., 30., 30.]), # 随机生成goal时的状态范围，速度只作为目标速度
+        "goal_state_range": jnp.array([-33., -25., -7., 7., 150., 210., 20., 20.]), # 随机生成goal时的状态范围，速度只作为目标速度
         "obst_state_range": jnp.array([-20., 20., -6., 6., 150., 210., 0., 0.]), # 随机生成obstacle的状态范围
 
         "dist2goal_bias": 0.1, # 用于判断agent是否到达goal m
@@ -52,11 +52,12 @@ class MVEPathTracking(MVE):
     def __init__(self,
                  num_agents: int,
                  area_size: Optional[float] = None,
-                 max_step: int = 128,
+                 max_step: int = 256,
                  max_travel: Optional[float] = None,
                  dt: float = 0.05,
                  params: dict = None
                  ):
+        area_size = MVEPathTracking.PARAMS["default_state_range"][:4] if area_size is None else area_size
         params = MVEPathTracking.PARAMS if params is None else params
         super(MVEPathTracking, self).__init__(num_agents, area_size, max_step, max_travel, dt, params)
 
@@ -67,7 +68,17 @@ class MVEPathTracking(MVE):
 
     @property
     def reward_min(self) -> float:
-        return -(jnp.abs(self.area_size[3] - self.area_size[2]) * 0.01) * self.max_episode_steps
+        return -(jnp.abs(self.area_size[3] - self.area_size[2])/2 * 0.01 + 1 * 0.05 + 20 * 0.01) * self.max_episode_steps * 0.5
+
+    @override
+    @property
+    def n_cost(self) -> int:
+        return 4 # agent间碰撞(1) + agent-obstacle碰撞(1) + agent超出y轴范围(高+低，2)
+
+    @override
+    @property
+    def cost_components(self) -> Tuple[str, ...]:
+        return "agent collisions", "obs collisions", "bound exceeds y low", "bound exceeds y high"
 
     @override
     def reset(self, key: Array) -> GraphsTuple:
@@ -218,7 +229,6 @@ class MVEPathTracking(MVE):
         dist2paths = jnp.abs(paths_y - y)
         # jax.debug.print("dist2paths={dist}", dist=dist2paths)
         reward -= (dist2paths.mean()) * 0.01
-        reward -= jnp.where(dist2paths > self.params["dist2goal_bias"], 1.0, 0.0).mean() * 0.001
         # 角度奖励
         agents_theta_grad = agents_states[:, 2] * jnp.pi / 180
         agents_vec = jnp.stack([jnp.cos(agents_theta_grad), jnp.sin(agents_theta_grad)], axis=1)
@@ -227,16 +237,16 @@ class MVEPathTracking(MVE):
         paths_theta = jnp.atan(paths_derivative)
         paths_vec = -jnp.stack([jnp.cos(paths_theta), jnp.sin(paths_theta)], axis=1) # 这里就只能处理车辆往x轴负方向运动的情况了
         theta2paths = jnp.einsum('ij,ij->i', agents_vec, paths_vec)
-        reward += (theta2paths.mean() - 1) * 0.002
-        reward -= jnp.where(theta2paths < self.params["theta2goal_bias"], 1.0, 0.0).mean() * 0.0002
+        reward += (theta2paths.mean() - 1) * 0.05
+        reward -= jnp.where(theta2paths < self.params["theta2goal_bias"], 1.0, 0.0).mean() * 0.01
 
         # 速度跟踪奖励
         v_goal = goals_states[:, 3]
         v = agents_states[:, 3]
-        reward -= ((v_goal - v).mean()) * 0.001
+        reward -= (jnp.abs(v_goal - v).mean()) * 0.01
 
         # 速率一致性奖励
-        reward -= (jnp.abs(action[:, 0] - agents_states[:, -1])).mean() * 0.0001
+        reward -= (jnp.abs(action[:, 0] - agents_states[:, -1])).mean() * 0.001
 
         return reward
 
@@ -271,25 +281,22 @@ class MVEPathTracking(MVE):
             min_dist = jnp.min(dist, axis=1)
             obst_cost: Array = agent_radius + obst_radius + self.params["collide_extra_bias"] - min_dist
 
-        """
         # 对于agent是否超出边界的判断
         if "rollout_state_range" in self.params and self.params["rollout_state_range"] is not None:
             rollout_state_range = self.params["rollout_state_range"]
         else:
             rollout_state_range = self.params["default_state_range"]
-        agent_bound_cost_xl = rollout_state_range[0] - agent_pos[:, 0]
-        agent_bound_cost_xh = -(rollout_state_range[1] - agent_pos[:, 0])
         agent_bound_cost_yl = rollout_state_range[2] - agent_pos[:, 1]
         agent_bound_cost_yh = -(rollout_state_range[3] - agent_pos[:, 1])
-        agent_bound_cost = jnp.concatenate([agent_bound_cost_xl[:, None], agent_bound_cost_xh[:, None],
-                                            agent_bound_cost_yl[:, None], agent_bound_cost_yh[:, None]], axis=1)
+        agent_bound_cost = jnp.stack([agent_bound_cost_yl, agent_bound_cost_yh], axis=1)
 
         cost = jnp.concatenate([agent_cost[:, None], obst_cost[:, None], agent_bound_cost], axis=1)
         assert cost.shape == (num_agents, self.n_cost)
-        """
 
+        """
         cost = jnp.concatenate([agent_cost[:, None], obst_cost[:, None]], axis=1)
         assert cost.shape == (num_agents, self.n_cost)
+        """
 
         # add margin
         eps = 0.5
@@ -554,7 +561,6 @@ class MVEPathTracking(MVE):
             agent_obst_edges = [EdgeBlock(state_diff, agent_obs_mask, id_agent, id_obs)]
 
         return [agent_agent_edges] + agent_goal_edges + agent_obst_edges
-        # return agent_goal_edges + agent_obst_edges
 
     def generate_path(self, env_state: MVEEnvState) -> Path:
         """根据起点和终点求解五次多项式并写入graph"""
@@ -630,12 +636,12 @@ class MVEPathTracking(MVE):
 
     def state_lim(self, state: Optional[State] = None) -> Tuple[State, State]:
         lower_lim = self.params["rollout_state_range"][
-            jnp.array([0, 2, 4, 6])]  # + jnp.array([0,-3,0,0]) # y方向增加可行宽度（相当于增加护墙不让车跨越，让车学会不要超出道路限制）
-        upper_lim = self.params["rollout_state_range"][jnp.array([1, 3, 5, 7])]  # + jnp.array([0,3,0,0])
+            jnp.array([0, 2, 4, 6])]  + jnp.array([0,-3,0,0]) # y方向增加可行宽度（相当于增加护墙不让车跨越，让车学会不要超出道路限制）
+        upper_lim = self.params["rollout_state_range"][jnp.array([1, 3, 5, 7])]  + jnp.array([0,3,0,0])
         return lower_lim, upper_lim
 
     @override
     def action_lim(self) -> Tuple[Action, Action]:
-        lower_lim = jnp.array([0., -30.])[None, :].repeat(self.num_agents, axis=0) # v(不能倒车), delta
-        upper_lim = jnp.array([30., 30.])[None, :].repeat(self.num_agents, axis=0)
+        lower_lim = jnp.array([0., -15.])[None, :].repeat(self.num_agents, axis=0) # v(不能倒车), delta
+        upper_lim = jnp.array([30., 15.])[None, :].repeat(self.num_agents, axis=0)
         return lower_lim, upper_lim

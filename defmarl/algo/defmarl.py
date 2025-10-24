@@ -534,6 +534,7 @@ class DefMARL(Algorithm):
             clip_frac = jnp.mean(loss_policy2 > loss_policy1)
             loss_policy = jax.lax.pmean(jnp.maximum(loss_policy1, loss_policy2).mean(), axis_name='n_gpu')
             mean_entropy = jax.lax.pmean(bcTa_entropy.mean(), axis_name='n_gpu')
+            # mean_entropy = jnp.clip(jax.lax.pmean(bcTa_entropy.mean(), axis_name='n_gpu'), -10, 10)
             policy_loss = loss_policy - self.coef_ent * mean_entropy
             total_variation_dist = jax.lax.pmean(0.5 * jnp.mean(jnp.abs(bcTa_ratio - 1.0)), axis_name='n_gpu')
             info = {
