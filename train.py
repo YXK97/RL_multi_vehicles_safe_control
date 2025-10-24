@@ -25,8 +25,8 @@ def train(args):
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if args.debug:
         os.environ["WANDB_MODE"] = "disabled"
-    #elif not is_connected():
-    #    os.environ["WANDB_MODE"] = "offline"
+    elif not is_connected():
+        os.environ["WANDB_MODE"] = "offline"
     np.random.seed(args.seed)
 
 
