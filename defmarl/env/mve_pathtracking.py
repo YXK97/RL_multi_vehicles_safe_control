@@ -68,7 +68,7 @@ class MVEPathTracking(MVE):
 
     @property
     def reward_min(self) -> float:
-        return -(jnp.abs(self.area_size[3] - self.area_size[2])/2 * 0.01 + 1 * 0.05 + 20 * 0.01) * self.max_episode_steps * 0.5
+        return -(jnp.abs(self.area_size[3] - self.area_size[2])/2 * 0.01 + 1 * 0.01 + 20 * 0.01) * self.max_episode_steps * 0.7
 
     @override
     @property
@@ -237,8 +237,8 @@ class MVEPathTracking(MVE):
         paths_theta = jnp.atan(paths_derivative)
         paths_vec = -jnp.stack([jnp.cos(paths_theta), jnp.sin(paths_theta)], axis=1) # 这里就只能处理车辆往x轴负方向运动的情况了
         theta2paths = jnp.einsum('ij,ij->i', agents_vec, paths_vec)
-        reward += (theta2paths.mean() - 1) * 0.05
-        reward -= jnp.where(theta2paths < self.params["theta2goal_bias"], 1.0, 0.0).mean() * 0.01
+        reward += (theta2paths.mean() - 1) * 0.01
+        reward -= jnp.where(theta2paths < self.params["theta2goal_bias"], 1.0, 0.0).mean() * 0.005
 
         # 速度跟踪奖励
         v_goal = goals_states[:, 3]
