@@ -11,7 +11,7 @@ import numpy as np
 import wandb
 import yaml
 import jax
-
+import jax.numpy as jnp
 from defmarl.algo import make_algo
 from defmarl.env import make_env
 from defmarl.trainer.trainer import Trainer
@@ -88,17 +88,37 @@ def train(args):
     if args.name is not None:
         run_name = run_name + "_" + args.name
 
+     # load config
+    if args.path is not None:
+        with open(os.path.join(args.path, "config.yaml"), "r") as f:
+            config = yaml.load(f, Loader=yaml.UnsafeLoader)
+
+    # 加载step
+    path = args.path
+    model_path = os.path.join(path, "models")
+    if args.step is None:
+        models = os.listdir(model_path)
+        step = max([int(model) for model in models if model.isdigit()])
+    else:
+        step = args.step
+    print("step: ", step)
+    algo.load(model_path, step)
+    # start training
+    # create trainer
+    remaining_steps = args.steps - step
+    print("remain_step:",remaining_steps)
+
     # get training parameters
     train_params = {
         "run_name": run_name,
         "training_steps": args.steps,
+       # "training_steps": remaining_steps, # debug
         "eval_interval": args.eval_interval,
         "eval_epi": args.eval_epi,
         "save_interval": args.save_interval,
         "full_eval_interval": args.full_eval_interval,
+        "start_step":step,
     }
-
-    # create trainer
     trainer = Trainer(
         env=env,
         env_test=env_test,
@@ -112,7 +132,6 @@ def train(args):
         save_log=not args.debug,
         num_gpu=args.n_gpu
     )
-
     # save config
     wandb.config.update(args)
     wandb.config.update(algo.config)
@@ -120,8 +139,6 @@ def train(args):
         with open(f"{log_dir}/config.yaml", "w") as f:
             yaml.dump(args, f)
             yaml.dump(algo.config, f)
-
-    # start training
     trainer.train()
 
 
@@ -133,7 +150,7 @@ def main():
     parser.add_argument("--algo", type=str, required=True)
     parser.add_argument("-n", "--num-agents", type=int, required=True)
     parser.add_argument("--obs", type=int, required=True)
-
+    parser.add_argument("--path", type=str, required=True)
     # algorithm arguments
     parser.add_argument("--cost-weight", type=float, default=0.)
     parser.add_argument('--lagr-init', type=float, default=0.78)
@@ -166,7 +183,7 @@ def main():
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--use-lstm", action="store_true", default=False)
     parser.add_argument("--rnn-step", type=int, default=16)
-
+    parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--n-gpu", type=int, default=jax.local_device_count())
 
     args = parser.parse_args()
