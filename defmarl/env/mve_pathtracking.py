@@ -250,7 +250,7 @@ class MVEPathTracking(MVE):
 
         return reward
 
-    def get_cost(self, graph: MVEEnvGraphsTuple) -> Cost:
+    def get_cost_backup(self, graph: MVEEnvGraphsTuple) -> Cost:
         num_agents = graph.env_states.agent.shape[0]
         num_goals = graph.env_states.goal.shape[0]
         assert num_agents == num_goals
@@ -304,6 +304,109 @@ class MVEPathTracking(MVE):
         cost = jnp.clip(cost, a_min=-1.0)
 
         return cost
+
+    def get_cost(self, graph: MVEEnvGraphsTuple) -> Cost:
+        """如果直线距离在阈值之外，设定cost为小于0的值，如果直线距离在阈值之内，使用scaling factor计算cost"""
+        num_agents = graph.env_states.agent.shape[0]
+        num_goals = graph.env_states.goal.shape[0]
+        assert num_agents == num_goals
+        num_obsts = graph.env_states.obstacle.shape[0]
+
+        agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
+        obstacle_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
+
+        agent_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
+        agent_radius = jnp.linalg.norm(agent_nodes[0, 4:6] / 2)
+        if num_obsts > 0:
+            obstacle_nodes = graph.type_nodes(type_idx=MVE.OBST, n_type=num_obsts)
+            obst_radius = jnp.linalg.norm(obstacle_nodes[0, 4:6] / 2)
+
+        agent_dist_thresh = self.params["ego_radius"]*2 + 0.1
+        agent_obst_dist_thresh = self.params["ego_radius"] + self.params["obst_radius"] + 0.1
+        agent_bound_dist_thresh = self.params["ego_radius"] + 0.05
+
+        def process_single_agents_pair(i, j, d, t):
+            s = jax.lax.cond(
+                d >= t,
+                2*d/t,
+                lambda: compute_scaling(i, j, agent_states)
+                )
+            return s
+
+        # collision between agents
+        agent_pos = agent_states[:, :2]
+        dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1)
+        i_indices, j_indices = jnp.triu_indices(num_agents, k=1)
+        distances = dist[i_indices, j_indices]
+        agents_thresh_vec = jnp.ones_like(distances) * agent_dist_thresh
+        agents_pair_scaling = jax.vmap(process_single_agents_pair)(i_indices, j_indices, distances, agents_thresh_vec)
+
+        scaling = jnp.zeros((num_agents, num_agents))
+        scaling = scaling.at[i_indices, j_indices].set(agents_pair_scaling) # 上三角填充
+        scaling = scaling.at[j_indices, i_indices].set(agents_pair_scaling) # 下三角填充
+        scaling += jnp.eye(num_agents) * 1e6
+        min_scaling = jnp.min(scaling, axis=1)
+        a_agent_cost: Array = 1 - min_scaling
+
+        def process_single_agent_obst_pair(i, j, d, t):
+            s = jax.lax.cond(
+                d >= t,
+                2*d/t,
+                compute_scaling(i, j, agent_states)
+                )
+            return s
+
+        # collision between agents and obstacles
+        if num_obsts == 0:
+            a_obst_cost = -jnp.ones(num_agents)
+        else:
+            obstacle_pos = obstacle_states[:, :2]
+            dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(obstacle_pos, 0), axis=-1)
+            i_grid, j_grid = jnp.meshgrid(jnp.arange(num_agents), jnp.arange(num_obsts), indexing='ij')
+            i_indices = i_grid.ravel()  # [n*m]
+            j_indices = j_grid.ravel()  # [n*m]
+            distances = dist.ravel()  # [n*m]
+            agent_obst_thresh_vec = jnp.ones_like(distances) * agent_obst_dist_thresh
+            agent_obst_pair_scaling = jax.vmap(process_single_agent_obst_pair)(i_indices, j_indices, distances, agent_obst_thresh_vec)
+
+            scaling = agent_obst_pair_scaling.reshape((num_agents, num_obsts))
+            min_scaling = jnp.min(scaling, axis=1)
+            a_obst_cost: Array = 1 - min_scaling
+
+        def process_single_agent_bound(d, t_h, t_l):
+            s = jax.lax.cond(
+                d >= t_h,
+                2*d/t_h,
+                jax.lax.cond(
+                    d <= t_l,
+                    2*d/t_l,
+                    compute_scaling(i, j, agent_states)
+                )
+            )
+            return scaling
+
+        # 对于agent是否超出边界的判断，只对y方向有约束
+        if "rollout_state_range" in self.params and self.params["rollout_state_range"] is not None:
+            rollout_state_range = self.params["rollout_state_range"]
+        else:
+            rollout_state_range = self.params["default_state_range"]
+        agent_bound_dist_yl = rollout_state_range[2] - agent_pos[:, 1]
+        agent_bound_thresh_vec_h = jnp.ones_like(agent_bound_dist_yl) * agent_bound_dist_thresh
+        agent_bound_thresh_vec_l = -jnp.ones_like(agent_bound_dist_yl) * agent_bound_dist_thresh
+        agent_bound_yl_scaling = jax.vmap(process_single_agent_bound, in_axes=(0, 0, 0))(
+            agent_bound_dist_yl, agent_bound_thresh_vec_h, agent_bound_thresh_vec_l
+        )
+        a_bound_yl_cost: Array = 1 - agent_bound_yl_scaling
+
+        agent_bound_dist_yh = -(rollout_state_range[3] - agent_pos[:, 1])
+        agent_bound_yh_scaling = jax.vmap(process_single_agent_bound, in_axes=(0, 0, 0))(
+            agent_bound_dist_yh, agent_bound_thresh_vec_h, agent_bound_thresh_vec_l
+        )
+        a_bound_yh_cost: Array = 1 - agent_bound_yh_scaling
+
+        cost = jnp.stack([a_agent_cost, a_obst_cost, a_bound_yl_cost, a_bound_yh_cost], axis=1)
+        assert cost.shape == (num_agents, self.n_cost)
+
 
     @override
     def render_video(
