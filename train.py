@@ -2,7 +2,7 @@ import argparse
 import datetime
 import os
 # 设置可用GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
 os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
 
@@ -25,8 +25,8 @@ def train(args):
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if args.debug:
         os.environ["WANDB_MODE"] = "disabled"
-    #elif not is_connected():
-    #    os.environ["WANDB_MODE"] = "offline"
+    elif not is_connected():
+        os.environ["WANDB_MODE"] = "offline"
     np.random.seed(args.seed)
 
 
