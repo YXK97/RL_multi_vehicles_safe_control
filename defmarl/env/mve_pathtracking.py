@@ -12,15 +12,16 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
 
+from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
 from ..trainer.data import Rollout
 from ..utils.graph import EdgeBlock, GetGraph, GraphsTuple
 from ..utils.typing import Action, Reward, Cost, Array, State, Path, Done, Info
 from ..utils.utils import tree_index, MutablePatchCollection, save_anim
-from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
+from dpax.utils import scaling_calc_between_recs, scaling_calc_between_rec_and_hspace
 
 
 class MVEPathTracking(MVE):
-    """该任务使用循迹距离、方向误差和速度跟踪误差作为reward的度量，scaling factor作为cost的度量（未实现），每个agent分配一个goal并规划出一条轨迹（五次多项式）"""
+    """该任务使用循迹距离、方向误差和速度跟踪误差作为reward的度量，scaling factor作为cost的度量，每个agent分配一个goal并规划出一条轨迹（五次多项式）"""
 
     PARAMS = {
         "ego_lf": 0.905, # m
@@ -106,7 +107,7 @@ class MVEPathTracking(MVE):
                 paths = jnp.zeros((this_candidates.shape[0], 6))
                 tmp_graph = self.get_graph(tmp_state, paths, obst_as_agent=True)
                 cost = self.get_cost(tmp_graph)
-                return jnp.max(cost) > -0.5
+                return jnp.max(cost) > -0.2
 
             def get_valid_obsts(state_range, key):
                 use_key, this_key = jr.split(key, 2)
@@ -143,7 +144,7 @@ class MVEPathTracking(MVE):
             paths = jnp.zeros((this_candidates.shape[0], 6))
             tmp_graph = self.get_graph(tmp_state, paths)
             cost = self.get_cost(tmp_graph)
-            return jnp.max(cost) > -0.5
+            return jnp.max(cost) > -0.2
 
         def get_valid_agent_goal(state_range, key, obsts):
             use_key, this_key = jr.split(key, 2)
@@ -240,70 +241,22 @@ class MVEPathTracking(MVE):
         reward += (theta2paths.mean() - 1) * 0.01
         reward -= jnp.where(theta2paths < self.params["theta2goal_bias"], 1.0, 0.0).mean() * 0.005
 
-        # 速度跟踪奖励
+        # 速率跟踪奖励
         v_goal = goals_states[:, 3]
-        v = agents_states[:, 3]
+        v = action[:, 0]
         reward -= (jnp.abs(v_goal - v).mean()) * 0.01
 
+        # 转向角中性奖励
+        lower_lim, upper_lim = self.action_lim()
+        delta_l = lower_lim[1]
+        delta_u = upper_lim[1]
+        delta = action[:, 1]
+        reward -= (jnp.abs(jnp.tan(-jnp.pi/2 + jnp.pi * (delta - delta_l)/(delta_u - delta_l)))).mean() * 0.01
+
         # 速率一致性奖励
-        reward -= (jnp.abs(action[:, 0] - agents_states[:, -1])).mean() * 0.001
+        reward -= (jnp.abs(v - agents_states[:, -1])).mean() * 0.001
 
         return reward
-
-    def get_cost_backup(self, graph: MVEEnvGraphsTuple) -> Cost:
-        num_agents = graph.env_states.agent.shape[0]
-        num_goals = graph.env_states.goal.shape[0]
-        assert num_agents == num_goals
-        num_obsts = graph.env_states.obstacle.shape[0]
-
-        agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
-        obstacle_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
-
-        agent_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
-        agent_radius = jnp.linalg.norm(agent_nodes[0, 4:6] / 2)
-        if num_obsts > 0:
-            obstacle_nodes = graph.type_nodes(type_idx=MVE.OBST, n_type=num_obsts)
-            obst_radius = jnp.linalg.norm(obstacle_nodes[0, 4:6] / 2)
-
-        # collision between agents
-        agent_pos = agent_states[:, :2]
-        dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1)
-        dist += jnp.eye(num_agents) * 1e6
-        min_dist = jnp.min(dist, axis=1)
-        agent_cost: Array = agent_radius * 2 + self.params["collide_extra_bias"] - min_dist
-
-        # collision between agents and obstacles
-        if num_obsts == 0:
-            obst_cost = -jnp.ones(num_agents)
-        else:
-            obstacle_pos = obstacle_states[:, :2]
-            dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(obstacle_pos, 0), axis=-1)
-            min_dist = jnp.min(dist, axis=1)
-            obst_cost: Array = agent_radius + obst_radius + self.params["collide_extra_bias"] - min_dist
-
-        # 对于agent是否超出边界的判断
-        if "rollout_state_range" in self.params and self.params["rollout_state_range"] is not None:
-            rollout_state_range = self.params["rollout_state_range"]
-        else:
-            rollout_state_range = self.params["default_state_range"]
-        agent_bound_cost_yl = rollout_state_range[2] - agent_pos[:, 1]
-        agent_bound_cost_yh = -(rollout_state_range[3] - agent_pos[:, 1])
-        agent_bound_cost = jnp.stack([agent_bound_cost_yl, agent_bound_cost_yh], axis=1)
-
-        cost = jnp.concatenate([agent_cost[:, None], obst_cost[:, None], agent_bound_cost], axis=1)
-        assert cost.shape == (num_agents, self.n_cost)
-
-        """
-        cost = jnp.concatenate([agent_cost[:, None], obst_cost[:, None]], axis=1)
-        assert cost.shape == (num_agents, self.n_cost)
-        """
-
-        # add margin
-        eps = 0.5
-        cost = jnp.where(cost <= 0.0, cost - eps, cost + eps)
-        cost = jnp.clip(cost, a_min=-1.0)
-
-        return cost
 
     def get_cost(self, graph: MVEEnvGraphsTuple) -> Cost:
         """如果直线距离在阈值之外，设定cost为小于0的值，如果直线距离在阈值之内，使用scaling factor计算cost"""
@@ -313,23 +266,24 @@ class MVEPathTracking(MVE):
         num_obsts = graph.env_states.obstacle.shape[0]
 
         agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
-        obstacle_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
-
         agent_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
         agent_radius = jnp.linalg.norm(agent_nodes[0, 4:6] / 2)
+        agent_dist_thresh = agent_radius * 2 + 0.1
+        agent_bound_dist_thresh = agent_radius + 0.05
+
         if num_obsts > 0:
+            obstacle_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
             obstacle_nodes = graph.type_nodes(type_idx=MVE.OBST, n_type=num_obsts)
             obst_radius = jnp.linalg.norm(obstacle_nodes[0, 4:6] / 2)
-
-        agent_dist_thresh = self.params["ego_radius"]*2 + 0.1
-        agent_obst_dist_thresh = self.params["ego_radius"] + self.params["obst_radius"] + 0.1
-        agent_bound_dist_thresh = self.params["ego_radius"] + 0.05
+            agent_obst_dist_thresh = agent_radius + obst_radius + 0.1
 
         def process_single_agents_pair(i, j, d, t):
+            agent1_node = agent_nodes[i]
+            agent2_node = agent_nodes[j]
             s = jax.lax.cond(
                 d >= t,
-                2*d/t,
-                lambda: compute_scaling(i, j, agent_states)
+                lambda: 2.,
+                lambda: scaling_calc_between_recs(agent1_node, agent2_node)
                 )
             return s
 
@@ -349,10 +303,12 @@ class MVEPathTracking(MVE):
         a_agent_cost: Array = 1 - min_scaling
 
         def process_single_agent_obst_pair(i, j, d, t):
+            agent_node = agent_nodes[i]
+            obst_node = obstacle_nodes[j]
             s = jax.lax.cond(
                 d >= t,
-                2*d/t,
-                compute_scaling(i, j, agent_states)
+                lambda: 2.,
+                lambda: scaling_calc_between_recs(agent_node, obst_node)
                 )
             return s
 
@@ -373,17 +329,17 @@ class MVEPathTracking(MVE):
             min_scaling = jnp.min(scaling, axis=1)
             a_obst_cost: Array = 1 - min_scaling
 
-        def process_single_agent_bound(d, t_h, t_l):
+        def process_single_agent_bound(node, A, b, r, d, t_h, t_l):
             s = jax.lax.cond(
                 d >= t_h,
-                2*d/t_h,
-                jax.lax.cond(
+                lambda: 0.,
+                lambda: jax.lax.cond(
                     d <= t_l,
-                    2*d/t_l,
-                    compute_scaling(i, j, agent_states)
+                    lambda: 2.,
+                    lambda: scaling_calc_between_rec_and_hspace(node, A, b, r)
                 )
             )
-            return scaling
+            return s
 
         # 对于agent是否超出边界的判断，只对y方向有约束
         if "rollout_state_range" in self.params and self.params["rollout_state_range"] is not None:
@@ -393,19 +349,27 @@ class MVEPathTracking(MVE):
         agent_bound_dist_yl = rollout_state_range[2] - agent_pos[:, 1]
         agent_bound_thresh_vec_h = jnp.ones_like(agent_bound_dist_yl) * agent_bound_dist_thresh
         agent_bound_thresh_vec_l = -jnp.ones_like(agent_bound_dist_yl) * agent_bound_dist_thresh
-        agent_bound_yl_scaling = jax.vmap(process_single_agent_bound, in_axes=(0, 0, 0))(
-            agent_bound_dist_yl, agent_bound_thresh_vec_h, agent_bound_thresh_vec_l
-        )
+        A = jnp.array([[0., -1.]])
+        b = -rollout_state_range[2]
+        r = jnp.array([0., rollout_state_range[2]-6])
+        agent_bound_yl_scaling = jax.vmap(process_single_agent_bound, in_axes=(0, None, None, None, 0, 0, 0))(
+            agent_nodes, A, b, r,
+            agent_bound_dist_yl, agent_bound_thresh_vec_h, agent_bound_thresh_vec_l)
         a_bound_yl_cost: Array = 1 - agent_bound_yl_scaling
 
         agent_bound_dist_yh = -(rollout_state_range[3] - agent_pos[:, 1])
-        agent_bound_yh_scaling = jax.vmap(process_single_agent_bound, in_axes=(0, 0, 0))(
-            agent_bound_dist_yh, agent_bound_thresh_vec_h, agent_bound_thresh_vec_l
-        )
+        A = jnp.array([[0., 1.]])
+        b = rollout_state_range[3]
+        r = jnp.array([0., rollout_state_range[3]+6])
+        agent_bound_yh_scaling = jax.vmap(process_single_agent_bound, in_axes=(0, None, None, None, 0, 0, 0))(
+            agent_nodes, A, b, r,
+            agent_bound_dist_yh, agent_bound_thresh_vec_h, agent_bound_thresh_vec_l)
         a_bound_yh_cost: Array = 1 - agent_bound_yh_scaling
 
         cost = jnp.stack([a_agent_cost, a_obst_cost, a_bound_yl_cost, a_bound_yh_cost], axis=1)
         assert cost.shape == (num_agents, self.n_cost)
+
+        return cost
 
 
     @override
@@ -745,6 +709,6 @@ class MVEPathTracking(MVE):
 
     @override
     def action_lim(self) -> Tuple[Action, Action]:
-        lower_lim = jnp.array([0., -15.])[None, :].repeat(self.num_agents, axis=0) # v(不能倒车), delta
-        upper_lim = jnp.array([30., 15.])[None, :].repeat(self.num_agents, axis=0)
+        lower_lim = jnp.array([10., -30.])[None, :].repeat(self.num_agents, axis=0) # v(不能倒车), delta
+        upper_lim = jnp.array([30., 30.])[None, :].repeat(self.num_agents, axis=0)
         return lower_lim, upper_lim
