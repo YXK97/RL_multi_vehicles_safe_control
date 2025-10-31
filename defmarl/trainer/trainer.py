@@ -69,6 +69,8 @@ class Trainer:
 
         self.update_steps = 0
         self.key = jax.random.PRNGKey(seed)
+        self.start_step = params["start_step"]
+        self.remain_steps=params["training_steps"]
 
     @staticmethod
     def _check_params(params: dict) -> bool:
@@ -120,7 +122,7 @@ class Trainer:
         eval_zmin_fn = jax.jit(eval_zmin_fn) # aggressive
 
         # start training
-        pbar = tqdm(total=self.steps, ncols=80)
+        pbar = tqdm(total=self.steps,initial=self.start_step,ncols=80)
 
         # 用于测试的key
         eval_key = jr.PRNGKey(self.seed)
@@ -173,7 +175,7 @@ class Trainer:
             unsafe_frac = jax.lax.pmean((bTah_cost.max(axis=-1).max(axis=-2) >= 1e-6).mean(), axis_name='n_gpu')
             return  reward_mean, reward_final, cost, unsafe_frac
 
-        for step, step_key in enumerate(all_steps_keys):
+        for step, step_key in enumerate(all_steps_keys,start=self.start_step):
             # 在eval/collect/update前断开参数追踪
             current_params = jax.lax.stop_gradient(self.algo.params)
             # evaluate the algorithm
