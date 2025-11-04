@@ -9,6 +9,7 @@ from .mpe_corridor import MPECorridor
 from .mpe_connect_spread import MPEConnectSpread
 from .mve_dist_measure_target import MVEDistMeasureTarget
 from .mve_pathtracking import MVEPathTracking
+from .mve_lanechangeANDovertake import MVELaneChangeAndOverTake
 
 ENV = {
     'MPETarget': MPETarget,
@@ -19,6 +20,7 @@ ENV = {
     'MPEConnectSpread': MPEConnectSpread,
     'MVEDistMTarget': MVEDistMeasureTarget,
     'MVEPathTracking': MVEPathTracking,
+    'MVELaneChange': MVELaneChangeAndOverTake,
 }
 
 
