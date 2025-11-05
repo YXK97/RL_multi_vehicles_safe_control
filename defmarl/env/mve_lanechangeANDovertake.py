@@ -56,7 +56,8 @@ class MVELaneChangeAndOverTake(MVE):
         "n_obsts": 2, # 本环境使用两个obst，每根车道一个
 
         "dist2path_bias": 0.05, # 用于判断agent是否沿轨迹行驶 m
-        "theta2path_bias": 0.995 # 用于判断agent航向角是否满足轨迹的要求，即agent方向向量和轨迹方向向量夹角的cos是否大于0.995（是否小于5度）
+        "theta2path_bias": 0.995, # 用于判断agent航向角是否满足轨迹的要求，即agent方向向量和轨迹方向向量夹角的cos是否大于0.995（是否小于5度）
+        "delta2mid_bias": 5 # 用于判断前轮转角是否是中性，小于±5°就不惩罚
     }
     PARAMS.update({
         "ego_radius": jnp.linalg.norm(PARAMS["ego_bb_size"]/2), # m
@@ -215,11 +216,14 @@ class MVELaneChangeAndOverTake(MVE):
 
         agents_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
         goals_states = graph.type_states(type_idx=MVE.GOAL, n_type=num_goals)
-        reward = jnp.zeros(()).astype(jnp.float32)
+        a_goal_v = jnp.linalg.norm(goals_states[:, 2:4], axis=1)
         a2_pos = agents_states[:, :2]
         a_path = agents_states[:, 8:]
         a_theta = agents_states[:, 4]
+        a_delta = agents_states[:, 5]
+        a_v = jnp.linalg.norm(agents_states[:, 2:4], axis=1)
 
+        reward = jnp.zeros(()).astype(jnp.float32)
         # 循迹奖励： 位置+角度
         # 位置奖励
         a_x = a2_pos[:, 0]
@@ -229,19 +233,28 @@ class MVELaneChangeAndOverTake(MVE):
             a_path, jnp.stack([ones, a_x, a_x**2, a_x**3, a_x**4, a_x**5], axis=1)))
         a2_paths_pos = jnp.stack([a_x, a_paths_y], axis=1)
         a_dist2paths = jnp.linalg.norm(a2_paths_pos - a2_pos, axis=-1)
-        reward -= (a_dist2paths.mean()) * 0.005
+        reward -= (a_dist2paths.mean()) * 0.01
+        reward -= jnp.where(a_dist2paths > self.params["dist2path_bias"], 1., 0.).mean() * 0.005
         # 角度奖励
         a_theta_grad = a_theta * jnp.pi / 180
-        a_vec = jnp.stack([jnp.cos(a_theta_grad), jnp.sin(a_theta_grad)], axis=1)
+        a2_vec = jnp.stack([jnp.cos(a_theta_grad), jnp.sin(a_theta_grad)], axis=1)
         a_paths_derivative = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
             a_path, jnp.stack([zeros, ones, 2*a_x, 3*a_x**2, 4*a_x**3, 5*a_x**4], axis=1))
-        paths_theta = jnp.atan(a_paths_derivative)
-        paths_vec = jnp.concatenate([jnp.cos(paths_theta)[:, None], jnp.sin(paths_theta)[:, None]], axis=1)
-        theta2paths = jnp.einsum('ij,ij->i', agents_vec, paths_vec)
-        reward += (theta2paths.mean() - 1) * 0.0002
+        a2_paths_vec = jnp.stack([ones, a_paths_derivative], axis=1) # 只能处理轨迹中车辆应当沿x轴正向前进的情况
+        a2_paths_vec = a2_paths_vec / jnp.linalg.norm(a2_paths_vec, axis=1)
+        a_theta2paths = jnp.einsum('ij,ij->i', a2_vec, a2_paths_vec)
+        reward += (a_theta2paths.mean() - 1) * 0.01
+        reward -= jnp.where(a_theta2paths < self.params["theta2path_bias"], 1., 0.).mean() * 0.005
 
-        # 速率一致性奖励
-        reward -= (jnp.abs(action[:, 0] - agents_states[:, -1])).mean() * 0.0001
+        # 速度跟踪奖励
+        reward -= jnp.abs(a_v - a_goal_v).mean() * 0.01
+
+        # 动作奖励
+        reward -= (action[:, 0]**2).mean() * 0.01
+        reward -= (action[:, 1]**2).mean() * 0.01
+
+        # 转向角中性奖励
+        reward -= (jax.nn.relu(jnp.abs(a_delta) - self.params["delta2mid_bias"])**2).mean() * 0.01
 
         return reward
 
