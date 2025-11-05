@@ -87,6 +87,16 @@ class MVELaneChangeAndOverTake(MVE):
     def node_dim(self) -> int:
         return 17  # state_dim(14)  indicator(3): agent: 001, goal: 010, obstacle: 100, pad: 00-1
 
+    @override
+    @property
+    def edge_dim(self) -> int:
+        return 8 # state_diff[:7]: x_diff, y_diff, vx_diff, vy_diff, theta_diff, delta_diff, bb_w_diff, bb_h_diff
+
+    @override
+    @property
+    def action_dim(self) -> int:
+        return 2  # a：车辆纵向加速度（m/s^2） omega：前轮转角角速度（逆时针为正，degree/s）
+
     @property
     def reward_min(self) -> float:
         return -(jnp.linalg.norm(jnp.array([self.area_size[jnp.array([0, 2])] - self.area_size[jnp.array([1, 3])]])) * 0.01) * self.max_episode_steps
@@ -205,34 +215,27 @@ class MVELaneChangeAndOverTake(MVE):
 
         agents_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
         goals_states = graph.type_states(type_idx=MVE.GOAL, n_type=num_goals)
-        agents_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
         reward = jnp.zeros(()).astype(jnp.float32)
-
-        # goal distance reward
-        agents_pos = agents_states[:, :2]
-        goals_pos = goals_states[:, :2]
-        dist2goals = jnp.linalg.norm(goals_pos - agents_pos, axis=-1)
-        reward -= (dist2goals.mean()) * 0.01
-        # not reaching goal reward
-        reward -= jnp.where(dist2goals > self.params["dist2goal_bias"], 1.0, 0.0).mean() * 0.03
+        a2_pos = agents_states[:, :2]
+        a_path = agents_states[:, 8:]
+        a_theta = agents_states[:, 4]
 
         # 循迹奖励： 位置+角度
         # 位置奖励
-        x = agents_pos[:, 0]
-        zeros = jnp.zeros_like(x)
-        ones = jnp.ones_like(x)
-        paths: Array[Path] = agents_nodes[:, 6:12]
-        paths_y = (jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
-            paths, jnp.stack([ones, x, x**2, x**3, x**4, x**5], axis=1)))
-        paths_pos = jnp.stack([x, paths_y], axis=1)
-        dist2paths = jnp.linalg.norm(paths_pos - agents_pos, axis=-1)
-        reward -= (dist2paths.mean()) * 0.005
+        a_x = a2_pos[:, 0]
+        zeros = jnp.zeros_like(a_x)
+        ones = jnp.ones_like(a_x)
+        a_paths_y = (jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
+            a_path, jnp.stack([ones, a_x, a_x**2, a_x**3, a_x**4, a_x**5], axis=1)))
+        a2_paths_pos = jnp.stack([a_x, a_paths_y], axis=1)
+        a_dist2paths = jnp.linalg.norm(a2_paths_pos - a2_pos, axis=-1)
+        reward -= (a_dist2paths.mean()) * 0.005
         # 角度奖励
-        agents_theta_grad = agents_states[:, 2] * jnp.pi / 180
-        agents_vec = jnp.concatenate([jnp.cos(agents_theta_grad)[:, None], jnp.sin(agents_theta_grad)[:, None]], axis=1)
-        paths_derivative = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
-            paths, jnp.stack([zeros, ones, 2*x, 3*x**2, 4*x**3, 5*x**4], axis=1))
-        paths_theta = jnp.atan(paths_derivative)
+        a_theta_grad = a_theta * jnp.pi / 180
+        a_vec = jnp.stack([jnp.cos(a_theta_grad), jnp.sin(a_theta_grad)], axis=1)
+        a_paths_derivative = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
+            a_path, jnp.stack([zeros, ones, 2*a_x, 3*a_x**2, 4*a_x**3, 5*a_x**4], axis=1))
+        paths_theta = jnp.atan(a_paths_derivative)
         paths_vec = jnp.concatenate([jnp.cos(paths_theta)[:, None], jnp.sin(paths_theta)[:, None]], axis=1)
         theta2paths = jnp.einsum('ij,ij->i', agents_vec, paths_vec)
         reward += (theta2paths.mean() - 1) * 0.0002
