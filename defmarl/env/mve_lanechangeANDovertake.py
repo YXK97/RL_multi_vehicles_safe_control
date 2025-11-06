@@ -12,11 +12,12 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
 
+from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
 from ..trainer.data import Rollout
 from ..utils.graph import EdgeBlock, GetGraph, GraphsTuple
 from ..utils.typing import Action, Reward, Cost, Array, State, Path
 from ..utils.utils import tree_index, MutablePatchCollection, save_anim
-from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
+from ..utils.scaling import scaling_calc
 
 INF = jnp.inf
 
@@ -259,60 +260,69 @@ class MVELaneChangeAndOverTake(MVE):
         return reward
 
     def get_cost(self, graph: MVEEnvGraphsTuple) -> Cost:
+        """使用射线法计算的scaling factor：α为cost的评判指标，1-α<0安全，>=0不安全"""
         num_agents = graph.env_states.agent.shape[0]
-        num_goals = graph.env_states.goal.shape[0]
-        assert num_agents == num_goals
         num_obsts = graph.env_states.obstacle.shape[0]
 
         agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
-        obstacle_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
+        # agent之间的scaling factor
+        if num_agents == 1:
+            a_agent_cost = -jnp.ones((num_agents,), dtype=jnp.float32)
+        else :
+            # 生成所有非重复的agent对（i,j），满足i < j（仅上三角，避免重复）
+            i_pairs, j_pairs = jnp.triu_indices(n=num_agents, k=1)  # k=1表示排除对角线（i=j）
+            state_i_pairs = agent_states[i_pairs, :]
+            state_j_pairs = agent_states[j_pairs, :]
+            alpha_pairs = jax.vmap(scaling_calc, in_axes=(0, 0))(state_i_pairs, state_j_pairs)
+            # 构造对称的α矩阵（对角线设为无穷大，排除自身）
+            alpha_matrix = jnp.full((num_agents, num_agents), -jnp.inf)  # 初始化矩阵，填充负无穷大
+            # 填充上三角（i<j）和下三角（j<i），利用对称性避免重复计算
+            alpha_matrix = alpha_matrix.at[i_pairs, j_pairs].set(alpha_pairs)
+            alpha_matrix = alpha_matrix.at[j_pairs, i_pairs].set(alpha_pairs)
+            # 步骤4：每个agent对应的行取最小值（即与其他agent的最小α）
+            a_agent_cost = jnp.min(1-alpha_matrix, axis=1)
 
-        agent_nodes = graph.type_nodes(type_idx=MVE.AGENT, n_type=num_agents)
-        agent_radius = jnp.linalg.norm(agent_nodes[0, 4:6] / 2)
-        if num_obsts > 0:
-            obstacle_nodes = graph.type_nodes(type_idx=MVE.OBST, n_type=num_obsts)
-            obst_radius = jnp.linalg.norm(obstacle_nodes[0, 4:6] / 2)
-
-        # collision between agents
-        agent_pos = agent_states[:, :2]
-        dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1)
-        dist += jnp.eye(num_agents) * 1e6
-        min_dist = jnp.min(dist, axis=1)
-        agent_cost: Array = agent_radius * 2 + self.params["collide_extra_bias"] - min_dist
-
-        # collision between agents and obstacles
+        # agent 和 obst 之间的scaling factor
         if num_obsts == 0:
-            obst_cost = -jnp.ones(num_agents)
+            a_obst_cost = -jnp.ones((num_agents,), dtype=jnp.float32)
         else:
-            obstacle_pos = obstacle_states[:, :2]
-            dist = jnp.linalg.norm(jnp.expand_dims(agent_pos, 1) - jnp.expand_dims(obstacle_pos, 0), axis=-1)
-            min_dist = jnp.min(dist, axis=1)
-            obst_cost: Array = agent_radius + obst_radius + self.params["collide_extra_bias"] - min_dist
+            obstacle_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
+            i_grid, j_grid = jnp.meshgrid(jnp.arange(num_agents), jnp.arange(num_obsts), indexing='ij')
+            i_pairs = i_grid.ravel()  # [num_agents*num_obsts]
+            j_pairs = j_grid.ravel()  # [num_agents*num_obsts]
+            state_i_pairs = agent_states[i_pairs, :]
+            state_j_pairs = obstacle_states[j_pairs, :]
+            alpha_pairs = jax.vmap(scaling_calc, in_axes=(0, 0))(state_i_pairs, state_j_pairs)
+            alpha_matrix = alpha_pairs.reshape((num_agents, num_obsts))
+            a_obst_cost = jnp.min(1-alpha_matrix, axis=1)
 
-        """
-        # 对于agent是否超出边界的判断
+        # agent 和 bound 之间的scaling factor，只对y方向有约束
         if "rollout_state_range" in self.params and self.params["rollout_state_range"] is not None:
             rollout_state_range = self.params["rollout_state_range"]
         else:
             rollout_state_range = self.params["default_state_range"]
-        agent_bound_cost_xl = rollout_state_range[0] - agent_pos[:, 0]
-        agent_bound_cost_xh = -(rollout_state_range[1] - agent_pos[:, 0])
-        agent_bound_cost_yl = rollout_state_range[2] - agent_pos[:, 1]
-        agent_bound_cost_yh = -(rollout_state_range[3] - agent_pos[:, 1])
-        agent_bound_cost = jnp.concatenate([agent_bound_cost_xl[:, None], agent_bound_cost_xh[:, None],
-                                            agent_bound_cost_yl[:, None], agent_bound_cost_yh[:, None]], axis=1)
+        agent_bound_dist_yl = rollout_state_range[2] - agent_pos[:, 1]
+        agent_bound_thresh_vec_h = jnp.ones_like(agent_bound_dist_yl) * agent_bound_dist_thresh
+        agent_bound_thresh_vec_l = -jnp.ones_like(agent_bound_dist_yl) * agent_bound_dist_thresh
+        A = jnp.array([[0., -1.]])
+        b = -rollout_state_range[2]
+        r = jnp.array([0., rollout_state_range[2] - 6])
+        agent_bound_yl_scaling = jax.vmap(process_single_agent_bound, in_axes=(0, None, None, None, 0, 0, 0))(
+            agent_nodes, A, b, r,
+            agent_bound_dist_yl, agent_bound_thresh_vec_h, agent_bound_thresh_vec_l)
+        a_bound_yl_cost: Array = 1 - agent_bound_yl_scaling
 
-        cost = jnp.concatenate([agent_cost[:, None], obst_cost[:, None], agent_bound_cost], axis=1)
+        agent_bound_dist_yh = -(rollout_state_range[3] - agent_pos[:, 1])
+        A = jnp.array([[0., 1.]])
+        b = rollout_state_range[3]
+        r = jnp.array([0., rollout_state_range[3] + 6])
+        agent_bound_yh_scaling = jax.vmap(process_single_agent_bound, in_axes=(0, None, None, None, 0, 0, 0))(
+            agent_nodes, A, b, r,
+            agent_bound_dist_yh, agent_bound_thresh_vec_h, agent_bound_thresh_vec_l)
+        a_bound_yh_cost: Array = 1 - agent_bound_yh_scaling
+
+        cost = jnp.stack([a_agent_cost, a_obst_cost, a_bound_yl_cost, a_bound_yh_cost], axis=1)
         assert cost.shape == (num_agents, self.n_cost)
-        """
-
-        cost = jnp.concatenate([agent_cost[:, None], obst_cost[:, None]], axis=1)
-        assert cost.shape == (num_agents, self.n_cost)
-
-        # add margin
-        eps = 0.5
-        cost = jnp.where(cost <= 0.0, cost - eps, cost + eps)
-        cost = jnp.clip(cost, a_min=-1.0)
 
         return cost
 
