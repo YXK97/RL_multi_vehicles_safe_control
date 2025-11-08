@@ -25,6 +25,7 @@ Done = BoolScalar
 Info = Dict[str, Shaped[Array, '']]
 EdgeIndex = Float[Array, '2 n_edge']
 AgentState = Float[Array, 'num_agents agent_state_dim']
+ObstState = Float[Array, 'num_obsts obst_state_dim']
 State = Float[Array, 'num_states state_dim'] | type
 Node = Float[Array, 'num_nodes node_dim']
 EdgeAttr = Float[Array, 'num_edges edge_dim']
