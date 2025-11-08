@@ -73,20 +73,8 @@ def train(args):
         clip_eps=args.clip_eps,
         lagr_init=args.lagr_init,
         lr_lagr=args.lr_lagr
+        coef_ent_value=args.coef_ent_value,
     )
-
-    # set up logger
-    start_time = datetime.datetime.now()
-    start_time = start_time.strftime("%m%d%H%M%S")
-    if not os.path.exists(f"{args.log_dir}/{args.env}/{args.algo}"):
-        os.makedirs(f"{args.log_dir}/{args.env}/{args.algo}", exist_ok=True)
-    start_time = int(start_time)
-    while os.path.exists(f"{args.log_dir}/{args.env}/{args.algo}/seed{args.seed}_{start_time}"):
-        start_time += 1
-    log_dir = f"{args.log_dir}/{args.env}/{args.algo}/seed{args.seed}_{start_time}"
-    run_name = f"{args.algo}_seed{args.seed}_{start_time}"
-    if args.name is not None:
-        run_name = run_name + "_" + args.name
 
      # load config
     if args.path is not None:
@@ -98,15 +86,35 @@ def train(args):
     model_path = os.path.join(path, "models")
     if args.step is None:
         models = os.listdir(model_path)
-        step = max([int(model) for model in models if model.isdigit()])
+        if not models:
+            step=0
+        else
+            step = max([int(model) for model in models if model.isdigit()])
+            algo.load(model_path, step)
     else:
         step = args.step
-    print("step: ", step)
-    algo.load(model_path, step)
-    # start training
-    # create trainer
     remaining_steps = args.steps - step
+    print("step: ", step)
     print("remain_step:",remaining_steps)
+
+    # set up logger
+    start_time = datetime.datetime.now()
+    start_time = start_time.strftime("%m%d%H%M%S")
+    if path is not None and step>0:
+        log_dir=os.path.join(path, "logs")
+    else
+        if not os.path.exists(f"{args.log_dir}/{args.env}/{args.algo}"):
+            os.makedirs(f"{args.log_dir}/{args.env}/{args.algo}", exist_ok=True)
+        start_time = int(start_time)
+        while os.path.exists(f"{args.log_dir}/{args.env}/{args.algo}/seed{args.seed}_{start_time}"):
+            start_time += 1
+        log_dir = f"{args.log_dir}/{args.env}/{args.algo}/seed{args.seed}_{start_time}"
+    run_name = f"{args.algo}_seed{args.seed}_{start_time}"
+    if args.name is not None:
+        run_name = run_name + "_" + args.name
+
+    coef_ent_value = get_coef_ent(current_step)
+    algo.config['coef_ent'] = coef_ent_value
 
     # get training parameters
     train_params = {
@@ -133,14 +141,19 @@ def train(args):
         num_gpu=args.n_gpu
     )
     # save config
+    wandb.init(
+        project="RL_experiments",
+        config={**config, **vars(args)},  # 合并之前的配置和当前的参数
+        resume="must"  # 恢复之前的实验
+    )
     wandb.config.update(args)
     wandb.config.update(algo.config)
+
     if not args.debug:
         with open(f"{log_dir}/config.yaml", "w") as f:
             yaml.dump(args, f)
             yaml.dump(algo.config, f)
     trainer.train()
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -156,7 +169,7 @@ def main():
     parser.add_argument('--lagr-init', type=float, default=0.78)
     parser.add_argument('--lr-lagr', type=float, default=1e-7)
     parser.add_argument('--clip-eps', type=float, default=0.25)
-    parser.add_argument("--coef-ent", type=float, default=1e-2)
+    #parser.add_argument("--coef-ent", type=float, default=1e-2)
 
     # environment arguments
     parser.add_argument('--full-observation', action='store_true', default=False)
@@ -189,6 +202,14 @@ def main():
     args = parser.parse_args()
     train(args)
 
+def get_coef_ent(step, start_step=0, mid_step=2000, end_step=8000, final_step=10000, start_value=0.001, end_value=0.0001):
+    if step < mid_step:
+        return start_value
+    elif step >= final_step:
+        return end_value
+    else:
+        coef_ent = start_value + (end_value - start_value) * ((step - mid_step) / (end_step - mid_step))
+        return coef_ent
 
 if __name__ == "__main__":
     with ipdb.launch_ipdb_on_exception():
