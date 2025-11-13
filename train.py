@@ -5,7 +5,6 @@ import ipdb
 import numpy as np
 import yaml
 
-
 def train(args):
     if args.visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_devices
@@ -22,9 +21,9 @@ def train(args):
     from defmarl.trainer.trainer import Trainer
     from defmarl.trainer.utils import is_connected
 
-
+    n_gpu = jax.local_device_count()
     print(f"> Running train.py {args}")
-    print(f"> Using {jax.local_device_count()} devices")
+    print(f"> Using {n_gpu} devices")
 
     # set up environment variables and seed
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -136,7 +135,7 @@ def train(args):
         seed=args.seed,
         params=train_params,
         save_log=not args.debug,
-        num_gpu=args.n_gpu
+        num_gpu=n_gpu
     )
     # save config
     wandb.config.update(args)
