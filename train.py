@@ -1,32 +1,37 @@
 import argparse
 import datetime
 import os
-# 设置可用GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
-os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
-os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
-
 import ipdb
 import numpy as np
-import wandb
 import yaml
-import jax
-import jax.numpy as jnp
-from defmarl.algo import make_algo
-from defmarl.env import make_env
-from defmarl.trainer.trainer import Trainer
-from defmarl.trainer.utils import is_connected
+
 
 def train(args):
+    if args.visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_devices
+    if args.use_proxy:
+        os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+
+    import wandb
+    import jax
+    import jax.numpy as jnp
+
+    from defmarl.algo import make_algo
+    from defmarl.env import make_env
+    from defmarl.trainer.trainer import Trainer
+    from defmarl.trainer.utils import is_connected
+
+
     print(f"> Running train.py {args}")
-    print(f"> Using {args.n_gpu} devices")
+    print(f"> Using {jax.local_device_count()} devices")
 
     # set up environment variables and seed
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if args.debug:
         os.environ["WANDB_MODE"] = "disabled"
-    #elif not is_connected():
-    #    os.environ["WANDB_MODE"] = "offline"
+    elif not is_connected():
+        os.environ["WANDB_MODE"] = "offline"
     np.random.seed(args.seed)
 
 
@@ -89,24 +94,25 @@ def train(args):
         run_name = run_name + "_" + args.name
 
      # load config
+    from_step = 0 # 预定义已训练步数
     if args.path is not None:
         with open(os.path.join(args.path, "config.yaml"), "r") as f:
             config = yaml.load(f, Loader=yaml.UnsafeLoader)
 
-    # 加载step
-    path = args.path
-    model_path = os.path.join(path, "models")
-    if args.step is None:
-        models = os.listdir(model_path)
-        step = max([int(model) for model in models if model.isdigit()])
-    else:
-        step = args.step
-    print("step: ", step)
-    algo.load(model_path, step)
-    # start training
-    # create trainer
-    remaining_steps = args.steps - step
-    print("remain_step:",remaining_steps)
+        # 加载step
+        path = args.path
+        model_path = os.path.join(path, "models")
+        if args.from_step is None:
+            models = os.listdir(model_path)
+            from_step = max([int(model) for model in models if model.isdigit()])
+        else:
+            from_step = args.from_step
+        print("from_step: ", from_step)
+        algo.load(model_path, from_step)
+        # start training
+        # create trainer
+        remaining_steps = args.steps - from_step
+        print("remain_step:",remaining_steps)
 
     # get training parameters
     train_params = {
@@ -117,7 +123,7 @@ def train(args):
         "eval_epi": args.eval_epi,
         "save_interval": args.save_interval,
         "full_eval_interval": args.full_eval_interval,
-        "start_step":step,
+        "start_step":from_step,
     }
     trainer = Trainer(
         env=env,
@@ -150,7 +156,7 @@ def main():
     parser.add_argument("--algo", type=str, required=True)
     parser.add_argument("-n", "--num-agents", type=int, required=True)
     parser.add_argument("--obs", type=int, required=True)
-    parser.add_argument("--path", type=str, required=True)
+    parser.add_argument("--path", type=str, default=None)
     # algorithm arguments
     parser.add_argument("--cost-weight", type=float, default=0.)
     parser.add_argument('--lagr-init', type=float, default=0.78)
@@ -183,8 +189,9 @@ def main():
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--use-lstm", action="store_true", default=False)
     parser.add_argument("--rnn-step", type=int, default=16)
-    parser.add_argument("--step", type=int, default=None)
-    parser.add_argument("--n-gpu", type=int, default=jax.local_device_count())
+    parser.add_argument("--from-step", type=int, default=None)
+    parser.add_argument("--visible-devices", type=str, default=None)
+    parser.add_argument("--use-proxy", action="store_true", default=False)
 
     args = parser.parse_args()
     train(args)
