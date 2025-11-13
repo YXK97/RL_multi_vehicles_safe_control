@@ -130,7 +130,6 @@ def scaling_calc_bound(s: State, A: Array, b: Array) -> Array:
     mk_dist0 = jnp.linalg.norm(m_V - O, axis=-1)[:, None].repeat(mk_dist.shape[1], axis=1)
     scaling = (mk_dist / mk_dist0).min()
 
-
     # 判断S1缩放中心是否在bound中
     O_in_bound = jnp.where((A @ O - b <= 0).all(), -1., 1.)
 
