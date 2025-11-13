@@ -78,6 +78,7 @@ class MVELaneChangeAndOverTake(MVE):
                  dt: float = 0.05,
                  params: dict = None
                  ):
+        area_size = MVELaneChangeAndOverTake.PARAMS["rollout_state_range"][:4] if area_size is None else area_size
         params = MVELaneChangeAndOverTake.PARAMS if params is None else params
         super(MVELaneChangeAndOverTake, self).__init__(num_agents, area_size, max_step, max_travel, dt, params)
         assert self.params["n_obsts"] == MVELaneChangeAndOverTake.PARAMS["n_obsts"], "本环境只接受2个障碍物的设置！"
@@ -95,7 +96,7 @@ class MVELaneChangeAndOverTake(MVE):
     @override
     @property
     def edge_dim(self) -> int:
-        return 9 # Δstate[:7]: Δx, Δy, Δvx, Δvy, Δθ, Δdθ/dt, Δδ, Δbb_w, Δbb_h
+        return 15 # Δstate: Δx, Δy, Δvx, Δvy, Δθ, Δdθ/dt, Δδ, Δbb_w, Δbb_h, Δai
 
     @override
     @property
@@ -144,7 +145,7 @@ class MVELaneChangeAndOverTake(MVE):
                 tmp_state = MVEEnvState(this_candidates, this_candidates, empty_obsts)
                 tmp_graph = self.get_graph(tmp_state, obst_as_agent=True)
                 cost = self.get_cost(tmp_graph)
-                return jnp.max(cost) > -0.5
+                return jnp.max(cost) > - 0.1
 
             def get_valid_obsts(state_range, key):
                 use_key, this_key = jr.split(key, 2)
@@ -186,7 +187,7 @@ class MVELaneChangeAndOverTake(MVE):
             tmp_state = MVEEnvState(this_candidates, this_candidates, obsts)
             tmp_graph = self.get_graph(tmp_state)
             cost = self.get_cost(tmp_graph)
-            return jnp.max(cost) > -0.5
+            return jnp.max(cost) > - 0.1
 
         def get_valid_agent(state_range, key, obsts):
             use_key1, use_key2, this_key = jr.split(key, 3)
@@ -238,17 +239,17 @@ class MVELaneChangeAndOverTake(MVE):
     def agent_step_euler(self, agent_states: AgentState, action: Action) -> AgentState:
         assert action.shape == (self.num_agents, self.action_dim)
         assert agent_states.shape == (self.num_agents, self.state_dim)
+        convert_vec = jnp.array([1, 1, 3.6, 3.6, 180/jnp.pi, 180/jnp.pi, 180/jnp.pi]) # eg. km/h / convert_vec -> m/s
 
         # 参数提取
         as_S = agent_states[:, :7] # x, y, vx, vy, θ, dθ/dt, δ
-        a_x = as_S[:, 0]; a_y = as_S[:, 1]
-        a_vx = as_S[:, 2]/3.6 # m/s
-        a_vy = as_S[:, 3]/3.6 # m/s
-        a_theta_rad = as_S[:, 4]*jnp.pi/180; a_dthetadt_rad = as_S[:, 5]*jnp.pi/180
-        a_delta_rad = as_S[:, 6]*jnp.pi/180
+        as_S_metric = as_S / convert_vec # km/h->m/s, degree->rad, degree/s->rad/s
+        a_vx = as_S_metric[:, 2] # m/s
+        a_vy = as_S_metric[:, 3] # m/s
+        a_dthetadt_rad = as_S_metric[:, 5] # rad/s
+        a_delta_rad = as_S_metric[:, 6] # rad/s
         a_0s = jnp.zeros((self.num_agents,), dtype=jnp.float32)
         m = self.params["ego_m"] # kg
-        L = self.params["ego_L"] # m
         lf = self.params["ego_lf"] # m
         lr = self.params["ego_lr"] # m
         Iz = self.params["ego_Iz"] # kg*m^2
@@ -272,14 +273,9 @@ class MVELaneChangeAndOverTake(MVE):
                           [0,0],
                           [0,0],
                           [0,1]])
-        as_dSdt = sa_f.T + action @ sd_g.T
-        as_S_new = as_S + as_dSdt * self.dt
-        # theta限制在[0,360]°
-        as_S_new = as_S_new.at[:, 4].set(as_S_new[:, 4] % 360)
-        # 速度从m/s转换到km/h
-        as_S_new = as_S_new.at[:, 2:4].set(as_S_new[:, 2:4]*3.6)
-        # 角度从rad转换到°
-        as_S_new = as_S_new.at[:, 4:].set(as_S_new[:, 4:]*180/jnp.pi)
+        as_dSdt_metric = sa_f.T + action @ sd_g.T
+        as_S_new_metric = as_S_metric + as_dSdt_metric * self.dt
+        as_S_new = as_S_new_metric * convert_vec # m/s->km/h, degree->rad, degree/s->rad/s
 
         new_agent_states = agent_states.at[:, :7].set(as_S_new)
         assert new_agent_states.shape == (self.num_agents, self.state_dim)
@@ -287,14 +283,15 @@ class MVELaneChangeAndOverTake(MVE):
 
     def obst_step_euler(self, o_obst_states: ObstState) -> ObstState:
         """障碍车作匀速直线运动"""
-        assert o_obst_states.shape == (self.num_obsts, self.state_dim)
+        num_obsts = o_obst_states.shape[0]
+        assert o_obst_states.shape == (num_obsts, self.state_dim)
 
         # 匀速直线运动模型
         o_x = o_obst_states[:, 0]
         o_vx = o_obst_states[:, 2]
         o_obst_states_new = o_obst_states.at[:, 0].set(o_x + o_vx/3.6*self.dt)
 
-        assert o_obst_states_new.shape == (self.num_obsts, self.state_dim)
+        assert o_obst_states_new.shape == (num_obsts, self.state_dim)
         return o_obst_states_new
 
     @override
@@ -384,7 +381,7 @@ class MVELaneChangeAndOverTake(MVE):
         agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
         # agent之间的scaling factor
         if num_agents == 1:
-            a_agent_cost = -jnp.ones((num_agents,), dtype=jnp.float32)
+            a_agent_cost = -jnp.ones((1,), dtype=jnp.float32)
         else :
             # 生成所有非重复的agent对（i,j），满足i < j（仅上三角，避免重复）
             i_pairs, j_pairs = jnp.triu_indices(n=num_agents, k=1)  # k=1表示排除对角线（i=j）
@@ -392,12 +389,12 @@ class MVELaneChangeAndOverTake(MVE):
             state_j_pairs = agent_states[j_pairs, :]
             alpha_pairs = jax.vmap(scaling_calc, in_axes=(0, 0))(state_i_pairs, state_j_pairs)
             # 构造对称的α矩阵（对角线设为无穷大，排除自身）
-            alpha_matrix = jnp.full((num_agents, num_agents), -jnp.inf)  # 初始化矩阵，填充负无穷大
+            alpha_matrix = jnp.full((num_agents, num_agents), INF)  # 初始化矩阵，填充无穷大
             # 填充上三角（i<j）和下三角（j<i），利用对称性避免重复计算
             alpha_matrix = alpha_matrix.at[i_pairs, j_pairs].set(alpha_pairs)
             alpha_matrix = alpha_matrix.at[j_pairs, i_pairs].set(alpha_pairs)
-            # 步骤4：每个agent对应的行取最小值（即与其他agent的最小α）
-            a_agent_cost = jnp.min(1-alpha_matrix, axis=1)
+            # 步骤4：每个agent对应的行取最大值（即与其他agent的最小α，α越小越不安全）
+            a_agent_cost = jnp.max(1-alpha_matrix, axis=1)
 
         # agent 和 obst 之间的scaling factor
         if num_obsts == 0:
@@ -411,25 +408,41 @@ class MVELaneChangeAndOverTake(MVE):
             state_j_pairs = obstacle_states[j_pairs, :]
             alpha_pairs = jax.vmap(scaling_calc, in_axes=(0, 0))(state_i_pairs, state_j_pairs)
             alpha_matrix = alpha_pairs.reshape((num_agents, num_obsts))
-            a_obst_cost = jnp.min(1-alpha_matrix, axis=1)
+            a_obst_cost = jnp.max(1-alpha_matrix, axis=1)
 
         # agent 和 bound 之间的scaling factor，只对y方向有约束
-        if "rollout_state_range" in self.params and self.params["rollout_state_range"] is not None:
-            rollout_state_range = self.params["rollout_state_range"]
-        else:
-            rollout_state_range = self.params["default_state_range"]
-        yl = rollout_state_range[2]
-        A = jnp.array([[0., -1.]])
-        b = jnp.array([-yl])
+        state_range = self.params["default_state_range"]
+        yl = state_range[2]
+        A = jnp.array([[0., 1.]])
+        b = jnp.array([yl])
         a_bound_yl_cost = 1 - jax.vmap(scaling_calc_bound, in_axes=(0, None, None))(agent_states, A, b)
 
-        yh = rollout_state_range[3]
-        A = jnp.array([[0., 1.]])
-        b = jnp.array([yh])
+        yh = state_range[3]
+        A = jnp.array([[0., -1.]])
+        b = jnp.array([-yh])
         a_bound_yh_cost = 1 - jax.vmap(scaling_calc_bound, in_axes=(0, None, None))(agent_states, A, b)
 
         cost = jnp.stack([a_agent_cost, a_obst_cost, a_bound_yl_cost, a_bound_yh_cost], axis=1)
         assert cost.shape == (num_agents, self.n_cost)
+
+        # debug
+        if num_obsts > 0:
+            obst_states = graph.type_states(type_idx=MVE.OBST, n_type=num_obsts)
+            jax.debug.print("======================= \n "
+                                "agent_states={agent_states} \n "
+                                "obst_states={obst_states} \n"
+                                "cost={cost} \n"
+                                "==================== \n ",
+                                agent_states=agent_states,
+                                obst_states=obst_states,
+                                cost=cost,)
+        else:
+            jax.debug.print("======================= \n "
+                                "agent_states={agent_states} \n "
+                                "cost={cost} \n"
+                                "==================== \n ",
+                                agent_states=agent_states,
+                                cost=cost)
 
         return cost
 
@@ -446,10 +459,10 @@ class MVELaneChangeAndOverTake(MVE):
         n_goals = self.num_agents if n_goals is None else n_goals
 
         ax: Axes
-        fig, ax = plt.subplots(1, 1, figsize=(20,
+        fig, ax = plt.subplots(1, 1, figsize=(30,
                                 (self.area_size[3]+3-(self.area_size[2]-3))*20/(self.area_size[1]+3-(self.area_size[0]-3))+4)
                                , dpi=100)
-        ax.set_xlim(self.area_size[0]-3, self.area_size[1]+3)
+        ax.set_xlim(self.area_size[0], self.area_size[1])
         ax.set_ylim(self.area_size[2]-3, self.area_size[3]+3)
         ax.set(aspect="equal")
         plt.axis("on")
@@ -460,9 +473,10 @@ class MVELaneChangeAndOverTake(MVE):
         ax.axhline(y=self.area_size[2], linewidth=2, color='k')
         ax.axhline(y=self.area_size[3], linewidth=2, color='k')
 
-        # 画x轴方向的限制
-        ax.axvline(x=self.area_size[0], linewidth=2, color='k')
-        ax.axvline(x=self.area_size[1], linewidth=2, color='k')
+        # 画车道线
+        ax.axhline(y=3, linewidth=1.5, color='b')
+        ax.axhline(y=0, linewidth=1, linestyle='--', color='b')
+        ax.axhline(y=-3, linewidth=1.5, color='b')
 
         # plot the first frame
         T_graph = rollout.graph
@@ -514,7 +528,8 @@ class MVELaneChangeAndOverTake(MVE):
         # 画出agent的五次多项式path
         # state: x, y, vx, vy, θ, dθ/dt, δ, bb_w, bb_h, a0 ... a5
         agents_path = agents_state[:, 9:]
-        a_xs = jax.vmap(lambda xl, xh: jnp.linspace(xl, xh, 100), in_axes=(0, 0))(agents_pos[:, 0], goals_pos[:, 0])
+        a_xs = jax.vmap(lambda xl, xh: jnp.linspace(xl, xh, 100), in_axes=(0, 0))(
+            agents_pos[:, 0], 100 * jnp.ones_like(agents_pos[:, 0]))
         ones = jnp.ones_like(a_xs)
         a_X = jnp.stack([ones, a_xs, a_xs**2, a_xs**3, a_xs**4, a_xs**5], axis=1)
         a_ys = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(agents_path, a_X)
@@ -576,8 +591,8 @@ class MVELaneChangeAndOverTake(MVE):
         def update(kk: int) -> list[plt.Artist]:
             graph = tree_index(T_graph, kk)
             n_pos_t = graph.states[:-1, :2] # 最后一个node是padding，不要
-            n_theta_t = graph.states[:-1, 2]
-            n_bb_size_t = graph.nodes[:-1, 4:6]
+            n_theta_t = graph.states[:-1, 4]
+            n_bb_size_t = graph.nodes[:-1, 7:9]
             n_radius = jnp.linalg.norm(n_bb_size_t, axis=1)
 
             # update agents' positions and labels
@@ -755,12 +770,19 @@ class MVELaneChangeAndOverTake(MVE):
         # create graph
         # 去掉goal坐标的影响
         node_feats = node_feats.at[num_agents: num_agents + num_goals, :2].set(jnp.zeros((2,), dtype=jnp.float32))
-        env_state.goal = (
-            env_state.goal.at[num_agents: num_agents + num_goals, :2].set(jnp.zeros((2,), dtype=jnp.float32)))
-        states = jnp.concatenate([env_state.agent, env_state.goal], axis=0)
+        states = jnp.concatenate([node_feats[:num_agents, :-3], node_feats[num_agents: num_agents + num_goals, :-3]],
+                                 axis=0)
         if num_obsts > 0:
-            states = jnp.concatenate([states, env_state.obstacle], axis=0)
-        return GetGraph(node_feats, node_type, edge_blocks, env_state, states).to_padded()
+            states = jnp.concatenate([states, node_feats[num_agents + num_goals:, :-3]], axis=0)
+            new_env_state = MVEEnvState(node_feats[:num_agents, :-3],
+                                    node_feats[num_agents: num_agents + num_goals, :-3],
+                                    node_feats[num_agents + num_goals:, :-3])
+        else:
+            new_env_state = MVEEnvState(node_feats[:num_agents, :-3],
+                                        node_feats[num_agents: num_agents + num_goals, :-3],
+                                        jnp.empty((0, self.state_dim)))
+
+        return GetGraph(node_feats, node_type, edge_blocks, new_env_state, states).to_padded()
 
     @override
     def get_graph(self, env_state: MVEEnvState, obst_as_agent:bool = False) -> MVEEnvGraphsTuple:
@@ -807,10 +829,20 @@ class MVELaneChangeAndOverTake(MVE):
         edge_blocks = self.edge_blocks(env_state)
 
         # create graph
-        states = jnp.concatenate([env_state.agent, env_state.goal], axis=0)
+        # 去掉goal坐标的影响
+        node_feats = node_feats.at[num_agents: num_agents + num_goals, :2].set(jnp.zeros((2,), dtype=jnp.float32))
+        states = jnp.concatenate([node_feats[:num_agents, :-3], node_feats[num_agents: num_agents + num_goals, :-3]],
+                                 axis=0)
         if num_obsts > 0:
-            states = jnp.concatenate([states, env_state.obstacle], axis=0)
-        return GetGraph(node_feats, node_type, edge_blocks, env_state, states).to_padded()
+            states = jnp.concatenate([states, node_feats[num_agents + num_goals:, :-3]], axis=0)
+            new_env_state = MVEEnvState(node_feats[:num_agents, :-3],
+                                        node_feats[num_agents: num_agents + num_goals, :-3],
+                                        node_feats[num_agents + num_goals:, :-3])
+        else:
+            new_env_state = MVEEnvState(node_feats[:num_agents, :-3],
+                                        node_feats[num_agents: num_agents + num_goals, :-3],
+                                        jnp.empty((0, self.state_dim)))
+        return GetGraph(node_feats, node_type, edge_blocks, new_env_state, states).to_padded()
 
     def state_lim(self, state: Optional[State] = None) -> Tuple[State, State]:
         lower_lim = self.params["rollout_state_range"][jnp.array([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28])]
