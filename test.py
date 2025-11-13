@@ -4,21 +4,26 @@ import functools as ft
 import os
 import pathlib
 import ipdb
-import jax
-import jax.numpy as jnp
-import jax.random as jr
 import numpy as np
 import yaml
 
-from defmarl.algo import make_algo
-from defmarl.env import make_env
-from defmarl.trainer.data import Rollout
-from defmarl.trainer.utils import eval_rollout
-from defmarl.utils.utils import jax_jit_np, jax_vmap
-
-
 def test(args):
+    if args.visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_devices
+
+    import jax
+    import jax.numpy as jnp
+    import jax.random as jr
+
+    from defmarl.algo import make_algo
+    from defmarl.env import make_env
+    from defmarl.trainer.data import Rollout
+    from defmarl.trainer.utils import eval_rollout
+    from defmarl.utils.utils import jax_jit_np, jax_vmap
+
+    n_gpu = jax.local_device_count()
     print(f"> Running test.py {args}")
+    print(f"> Using {n_gpu} devices")
 
     stamp_str = datetime.datetime.now().strftime("%m%d-%H%M")
 
@@ -191,6 +196,7 @@ def main():
     parser.add_argument("-z", type=str, default=None)
     parser.add_argument("--area-size", type=float, default=None)
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--visible-devices", type=str, default=None)
 
     args = parser.parse_args()
     test(args)
