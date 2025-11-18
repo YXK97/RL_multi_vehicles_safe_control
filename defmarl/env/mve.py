@@ -108,8 +108,7 @@ class MVE(MultiAgentEnv, ABC): # # Multi Vehicles Environment
 
     @property
     def n_cost(self) -> int:
-        #return 6 # agent间碰撞(1) + agent-obstacle碰撞(1) + agent超出x轴范围(高+低，2) + agent超出y轴范围(高+低，2)
-        return 2 # agent间碰撞(1) + agent-obstacle碰撞(1)
+        return 6 # agent间碰撞(1) + agent-obstacle碰撞(1) + agent超出x轴范围(高+低，2) + agent超出y轴范围(高+低，2)
 
     @property
     def cost_components(self) -> Tuple[str, ...]:

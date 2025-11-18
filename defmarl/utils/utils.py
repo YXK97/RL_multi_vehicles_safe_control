@@ -195,3 +195,11 @@ def assert_shape(arr: _Arr, shape: int | Shape, label: str | None = None) -> _Ar
 
 def tree_where(cond: BoolScalar | bool, true_val: _PyTree, false_val: _PyTree) -> _PyTree:
     return jtu.tree_map(lambda x, y: jnp.where(cond, x, y), true_val, false_val)
+
+
+@jax.jit
+def calc_2d_rot_matrix(angle: float) -> Array:
+    "计算二维平面的旋转矩阵，angle输入为degree"
+    angle = angle * jnp.pi / 180
+    return jnp.array([[jnp.cos(angle), -jnp.sin(angle)],
+                      [jnp.sin(angle), jnp.cos(angle)]])
