@@ -1,15 +1,21 @@
 name: defmarl
 channels:
+  - nvidia
   - defaults
-  - https://repo.anaconda.com/pkgs/main
-  - https://repo.anaconda.com/pkgs/r
+  - conda-forge
 dependencies:
   - _libgcc_mutex=0.1=main
   - _openmp_mutex=5.1=1_gnu
   - bzip2=1.0.8=h5eee18b_6
-  - ca-certificates=2025.2.25=h06a4308_0
+  - ca-certificates=2025.11.12=hbd8a1cb_0
+  - cuda-nvrtc=12.9.86=0
+  - cuda-version=12.9=h4f385c5_3
+  - cudnn=9.12.0.46=h2b6041c_0
   - expat=2.7.1=h6a678d5_0
   - ld_impl_linux-64=2.40=h12ee557_0
+  - libcublas=12.9.1.4=0
+  - libcudnn=9.12.0.46=h24322f0_0
+  - libcudnn-dev=9.12.0.46=h2b6041c_0
   - libffi=3.4.4=h6a678d5_1
   - libgcc-ng=11.2.0=h1234567_1
   - libgomp=11.2.0=h1234567_1
@@ -126,3 +132,4 @@ dependencies:
       - wcwidth==0.2.13
       - wrapt==1.17.2
       - zipp==3.23.0
+prefix: /mnt/data/yangxiaoke/miniforge3/envs/defmarl
