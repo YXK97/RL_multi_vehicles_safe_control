@@ -45,7 +45,7 @@ class MVELaneChangeAndOverTake(MVE):
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # 默认范围，用于指示正常工作的状态范围
         "rollout_state_range": jnp.array([-120., 120., -10., 10., -100., 100., -100., 100., 0., 360., -INF, INF, -7., 7.,
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # rollout过程中的限制，强制约束
-        "rollout_state_b_range": jnp.array([-INF, INF, -INF, INF, 10., 100., -INF, INF, -INF, INF, -INF, INF, -INF, INF,
+        "rollout_state_b_range": jnp.array([-INF, INF, -INF, INF, 0., 100., -INF, INF, -INF, INF, -INF, INF, -INF, INF,
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # rollout过程中在车身坐标系下状态约束，主要对纵向速度有约束，动力学模型不允许倒车
         "agent_init_state_range": jnp.array([-100., -100., -1.5, 1.5, 0., 80., 0., 0., 0., 0., 0., 0., 0., 0.,
         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]),
@@ -452,7 +452,7 @@ class MVELaneChangeAndOverTake(MVE):
         a_bound_yh_cost = 1 - jax.vmap(scaling_calc_bound, in_axes=(0, None, None))(agent_states, A, b)
         """
         a_bound_yl_cost = -jnp.ones((num_agents,), dtype=jnp.float32)
-        a_bound_yh_cost = -jnp.ones((num_agents,), dtype=jnp.float32) 
+        a_bound_yh_cost = -jnp.ones((num_agents,), dtype=jnp.float32)
 
         cost = jnp.stack([a_agent_cost, a_obst_cost, a_bound_yl_cost, a_bound_yh_cost], axis=1)
         assert cost.shape == (num_agents, self.n_cost)
