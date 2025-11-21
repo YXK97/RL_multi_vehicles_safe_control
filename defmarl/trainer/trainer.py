@@ -61,21 +61,21 @@ class Trainer:
 
         self.save_log = save_log
 
-        self.steps = params['training_steps']
+        self.iters = params['training_iters']
         self.eval_interval = params['eval_interval']
         self.eval_epi = params['eval_epi']
         self.save_interval = params['save_interval']
         self.full_eval_interval = params['full_eval_interval']
 
-        self.update_steps = 0
+        self.update_iters = params["start_iter"]
         self.key = jax.random.PRNGKey(seed)
-        self.start_step = params["start_step"]
-        self.remain_steps=params["training_steps"]
+        self.start_iter = params["start_iter"]
+        self.remain_iters = params["remaining_iters"]
 
     @staticmethod
     def _check_params(params: dict) -> bool:
         assert 'run_name' in params, 'run_name not found in params'
-        assert 'training_steps' in params, 'training_steps not found in params'
+        assert 'training_iters' in params, 'training_iters not found in params'
         assert 'eval_interval' in params, 'eval_interval not found in params'
         assert params['eval_interval'] > 0, 'eval_interval must be positive'
         assert 'eval_epi' in params, 'eval_epi not found in params'
@@ -122,7 +122,7 @@ class Trainer:
         eval_zmin_fn = jax.jit(eval_zmin_fn) # aggressive
 
         # start training
-        pbar = tqdm(total=self.steps,initial=self.start_step,ncols=80)
+        pbar = tqdm(total=self.iters,initial=self.start_iter,ncols=80)
 
         # 用于测试的key
         eval_key = jr.PRNGKey(self.seed)
@@ -134,7 +134,7 @@ class Trainer:
             self.num_gpu, self.n_env_eval_per_gpu, -1)
 
         # 用于训练的key
-        all_steps_keys = jr.split(self.key, self.steps+1)
+        all_iters_keys = jr.split(self.key, self.iters+1)
 
         @ft.partial(jax.pmap, in_axes=(None, 0), axis_name='n_gpu')
         def opt_rollout_and_eval(params: dict, eval_keys: PRNGKey):
@@ -175,14 +175,16 @@ class Trainer:
             unsafe_frac = jax.lax.pmean((bTah_cost.max(axis=-1).max(axis=-2) >= 1e-6).mean(), axis_name='n_gpu')
             return  reward_mean, reward_final, cost, unsafe_frac
 
-        for step, step_key in enumerate(all_steps_keys,start=self.start_step):
+        for iter, iter_key in enumerate(all_iters_keys,start=self.start_iter):
+            if iter == 2:
+                print('debug')
             # 在eval/collect/update前断开参数追踪
             current_params = jax.lax.stop_gradient(self.algo.params)
             # evaluate the algorithm
-            if step % self.eval_interval == 0:
+            if iter % self.eval_interval == 0:
                 # eval_params = jax.device_get(self.algo.params)
                 eval_info = {}
-                if step % self.full_eval_interval == 0:
+                if iter % self.full_eval_interval == 0:
                     # full test with optimal z
                     reward_min, reward_max, reward_mean, reward_final, cost, unsafe_frac, opt_z0 = \
                         opt_rollout_and_eval(current_params, G_eval_opt_keys)
@@ -194,7 +196,7 @@ class Trainer:
                         "eval/opt_z0": float(opt_z0[0]),
                     }
                     time_since_start = time() - start_time
-                    eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, reward: {float(reward_mean[0]):9.4f}, '
+                    eval_verbose = (f'iter: {iter:3}, time: {time_since_start:5.0f}s, reward: {float(reward_mean[0]):9.4f}, '
                                     f'min/max reward: {float(reward_min[0]):7.2f}/{float(reward_max[0]):7.2f}, cost: {float(cost[0]):8.4f}, '
                                     f'unsafe_frac: {float(unsafe_frac[0]):6.2f}')
 
@@ -215,20 +217,20 @@ class Trainer:
                     "eval/unsafe_frac_zmax": float(unsafe_frac_zmax[0]),
                     "eval/unsafe_frac_zmin": float(unsafe_frac_zmin[0]),
                 }
-                wandb.log(eval_info, step=self.update_steps)
+                wandb.log(eval_info, step=self.update_iters)
 
             # save the model
-            if self.save_log and step % self.save_interval == 0:
-                self.algo.save(os.path.join(self.model_dir), step, params_to_save=current_params)
+            if self.save_log and iter % self.save_interval == 0:
+                self.algo.save(os.path.join(self.model_dir), iter, params_to_save=current_params)
 
             # collect rollouts
-            G_key_x0 = jax.random.split(step_key, self.num_gpu * self.n_env_train_per_gpu).reshape(
+            G_key_x0 = jax.random.split(iter_key, self.num_gpu * self.n_env_train_per_gpu).reshape(
                 self.num_gpu, self.n_env_train_per_gpu, -1)
             rollouts = self.algo.collect(current_params, G_key_x0)
 
             # update the algorithm
-            update_info = self.algo.update(rollouts, step)
-            wandb.log(update_info, step=self.update_steps)
-            self.update_steps += 1
+            update_info = self.algo.update(rollouts, iter)
+            wandb.log(update_info, step=self.update_iters)
+            self.update_iters += 1
 
             pbar.update(1)

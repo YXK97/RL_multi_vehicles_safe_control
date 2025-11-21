@@ -5,6 +5,7 @@ import ipdb
 import numpy as np
 import yaml
 
+
 def train(args):
     if args.visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_devices
@@ -50,6 +51,28 @@ def train(args):
         area_size=args.area_size
     )
 
+     # load config
+    from_iter = 0 # 预定义已训练步数
+    remaining_iters = args.iters - from_iter
+    model_path = None
+    if args.path is not None:
+        with open(os.path.join(args.path, "config.yaml"), "r") as f:
+            config = yaml.load(f, Loader=yaml.UnsafeLoader)
+            wandb.init(
+                project="RL_experiments",
+                config={**config, **vars(args)},  # 合并之前的配置和当前的参数
+                resume="must"  # 恢复之前的实验
+            )
+
+        # 加载iter
+        path = args.path
+        model_path = os.path.join(path, "models")
+        if args.from_iter is None:
+            models = os.listdir(model_path)
+            from_iter = max([int(model) for model in models if model.isdigit()])
+        else:
+            from_iter = args.from_iter
+
     # create algorithm
     algo = make_algo(
         algo=args.algo,
@@ -64,49 +87,54 @@ def train(args):
         critic_gnn_layers=args.gnn_layers,
         Vh_gnn_layers=args.Vh_gnn_layers,
         rnn_layers=args.rnn_layers,
+
         lr_actor=args.lr_actor,
+        lr_actor_decay=args.lr_actor_decay,
+        lr_actor_init=args.lr_actor_init,
+        lr_actor_decay_ratio=args.lr_actor_decay_ratio,
+        lr_actor_warmup_iters=args.lr_actor_warmup_iters,
+        lr_actor_trans_iters=args.lr_actor_trans_iters,
+
         lr_critic=args.lr_critic,
-        max_grad_norm=2.0,
+        lr_critic_decay=args.lr_critic_decay,
+        lr_critic_init=args.lr_critic_init,
+        lr_critic_decay_ratio=args.lr_critic_decay_ratio,
+        lr_critic_warmup_iters=args.lr_critic_warmup_iters,
+        lr_critic_trans_iters=args.lr_critic_trans_iters,
+
+        coef_ent=args.coef_ent,
+        coef_ent_decay=args.coef_ent_decay,
+        coef_ent_init=args.coef_ent_init,
+        coef_ent_decay_ratio=args.coef_ent_decay_ratio,
+        coef_ent_warmup_iters=args.coef_ent_warmup_iters,
+        coef_ent_trans_iters=args.coef_ent_trans_iters,
+
+        max_grad_norm=args.max_grad_norm,
         seed=args.seed,
         batch_size=args.batch_size,
         use_rnn=not args.no_rnn,
         use_lstm=args.use_lstm,
-        coef_ent=args.coef_ent,
         rnn_step=args.rnn_step,
-        gamma=0.99,
+        gamma=args.gamma,
         clip_eps=args.clip_eps,
         lagr_init=args.lagr_init,
-        lr_lagr=args.lr_lagr
-        coef_ent_value=args.coef_ent_value,
+        lr_lagr=args.lr_lagr,
+        iter_index=from_iter,
     )
 
-     # load config
-    from_step = 0 # 预定义已训练步数
-    if args.path is not None:
-        with open(os.path.join(args.path, "config.yaml"), "r") as f:
-            config = yaml.load(f, Loader=yaml.UnsafeLoader)
+    if model_path is not None:
+        algo.load(model_path, from_iter)
 
-        # 加载step
-        path = args.path
-        model_path = os.path.join(path, "models")
-        if args.from_step is None:
-            models = os.listdir(model_path)
-            from_step = max([int(model) for model in models if model.isdigit()])
-        else:
-            from_step = args.from_step
-        print("from_step: ", from_step)
-        algo.load(model_path, from_step)
-        # start training
-        # create trainer
-        remaining_steps = args.steps - from_step
-        print("remain_step:",remaining_steps)
+    print("from_iter: ", from_iter)
+    remaining_iters = args.iters - from_iter
+    print("remaining_iters:", remaining_iters)
 
     # set up logger
     start_time = datetime.datetime.now()
     start_time = start_time.strftime("%m%d%H%M%S")
-    if path is not None and step>0:
-        log_dir=os.path.join(path, "logs")
-    else
+    if args.path is not None and from_iter > 0:
+        log_dir=os.path.join(args.path, "logs")
+    else:
         if not os.path.exists(f"{args.log_dir}/{args.env}/{args.algo}"):
             os.makedirs(f"{args.log_dir}/{args.env}/{args.algo}", exist_ok=True)
         start_time = int(start_time)
@@ -117,19 +145,17 @@ def train(args):
     if args.name is not None:
         run_name = run_name + "_" + args.name
 
-    coef_ent_value = get_coef_ent(current_step)
-    algo.config['coef_ent'] = coef_ent_value
 
     # get training parameters
     train_params = {
         "run_name": run_name,
-        "training_steps": args.steps,
-       # "training_steps": remaining_steps, # debug
+        "training_iters": args.iters,
         "eval_interval": args.eval_interval,
         "eval_epi": args.eval_epi,
         "save_interval": args.save_interval,
         "full_eval_interval": args.full_eval_interval,
-        "start_step":from_step,
+        "start_iter": from_iter,
+        "remaining_iters": remaining_iters,
     }
     trainer = Trainer(
         env=env,
@@ -145,11 +171,6 @@ def train(args):
         num_gpu=n_gpu
     )
     # save config
-    wandb.init(
-        project="RL_experiments",
-        config={**config, **vars(args)},  # 合并之前的配置和当前的参数
-        resume="must"  # 恢复之前的实验
-    )
     wandb.config.update(args)
     wandb.config.update(algo.config)
 
@@ -168,12 +189,14 @@ def main():
     parser.add_argument("-n", "--num-agents", type=int, required=True)
     parser.add_argument("--obs", type=int, required=True)
     parser.add_argument("--path", type=str, default=None)
+
     # algorithm arguments
     parser.add_argument("--cost-weight", type=float, default=0.)
     parser.add_argument('--lagr-init', type=float, default=0.78)
     parser.add_argument('--lr-lagr', type=float, default=1e-7)
     parser.add_argument('--clip-eps', type=float, default=0.25)
-    #parser.add_argument("--coef-ent", type=float, default=1e-2)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--max-grad-norm", type=float, default=2.)
 
     # environment arguments
     parser.add_argument('--full-observation', action='store_true', default=False)
@@ -190,31 +213,45 @@ def main():
     parser.add_argument("--eval-epi", type=int, default=1)
     parser.add_argument("--save-interval", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--steps", type=int, default=100000)
+    parser.add_argument("--iters", type=int, default=100000)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--gnn-layers", type=int, default=2)
     parser.add_argument("--Vh-gnn-layers", type=int, default=1)
-    parser.add_argument("--lr-actor", type=float, default=3e-4)
-    parser.add_argument("--lr-critic", type=float, default=1e-3)
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--use-lstm", action="store_true", default=False)
     parser.add_argument("--rnn-step", type=int, default=16)
-    parser.add_argument("--from-step", type=int, default=None)
+    parser.add_argument("--from-iter", type=int, default=None)
     parser.add_argument("--visible-devices", type=str, default=None)
     parser.add_argument("--use-proxy", action="store_true", default=False)
+
+
+    # learning rate and entropy coefficient
+    parser.add_argument("--lr-actor", type=float, default=3e-4)
+    parser.add_argument("--lr-actor-decay", action="store_true", default=False)
+    parser.add_argument("--lr-actor-init", type=float, default=None)
+    parser.add_argument("--lr-actor-decay-ratio", type=float, default=None)
+    parser.add_argument("--lr-actor-warmup-iters", type=int, default=None)
+    parser.add_argument("--lr-actor-trans-iters", type=int, default=None)
+
+    parser.add_argument("--lr-critic", type=float, default=1e-3)
+    parser.add_argument("--lr-critic-decay", action="store_true", default=False)
+    parser.add_argument("--lr-critic-init", type=float, default=None)
+    parser.add_argument("--lr-critic-decay-ratio", type=float, default=None)
+    parser.add_argument("--lr-critic-warmup-iters", type=int, default=None)
+    parser.add_argument("--lr-critic-trans-iters", type=int, default=None)
+
+    parser.add_argument("--coef-ent", type=float, default=1e-3)
+    parser.add_argument("--coef-ent-decay", action="store_true", default=False)
+    parser.add_argument("--coef-ent-init", type=float, default=None)
+    parser.add_argument("--coef-ent-decay-ratio", type=float, default=None)
+    parser.add_argument("--coef-ent-warmup-iters", type=int, default=None)
+    parser.add_argument("--coef-ent-trans-iters", type=int, default=None)
 
     args = parser.parse_args()
     train(args)
 
-def get_coef_ent(step, start_step=0, mid_step=2000, end_step=8000, final_step=10000, start_value=0.001, end_value=0.0001):
-    if step < mid_step:
-        return start_value
-    elif step >= final_step:
-        return end_value
-    else:
-        coef_ent = start_value + (end_value - start_value) * ((step - mid_step) / (end_step - mid_step))
-        return coef_ent
+
 
 if __name__ == "__main__":
     with ipdb.launch_ipdb_on_exception():

@@ -13,8 +13,11 @@ from flax.training.train_state import TrainState
 from jax import lax
 
 from .module.root_finder import RootFinder
+from .utils import compute_dec_efocp_gae, compute_dec_efocp_V
+from .base import Algorithm
 from ..utils.typing import Action, Params, PRNGKey, Array, FloatScalar
 from ..utils.graph import GraphsTuple
+from ..utils.schedule import as_schedule, Schedule, Constant, LinDecay
 from ..utils.utils import jax_vmap, tree_index, tree_where
 from ..trainer.data import Rollout
 from ..trainer.utils import rollout as rollout_fn
@@ -22,8 +25,21 @@ from ..trainer.utils import has_any_nan_or_inf, compute_norm_and_clip
 from ..env.base import MultiAgentEnv
 from ..algo.module.value import ValueNet
 from ..algo.module.policy import PPOPolicy
-from .utils import compute_dec_efocp_gae, compute_dec_efocp_V
-from .base import Algorithm
+from ..nn.utils import get_default_tx
+
+
+def val_to_optax_schedule(val: float, val_decay: bool, val_init: Optional[float], val_decay_ratio: Optional[float],
+                          val_warmup_iters: Optional[int], val_trans_iters: Optional[int]) -> optax.Schedule:
+    """根据参数设置配置schedule并make，可用于Constant或LinDecay"""
+
+    if val_decay:
+        assert (val_init is not None) and \
+               (val_decay_ratio is not None) and \
+               (val_warmup_iters is not None) and \
+               (val_trans_iters is not None), "decay需要配置参数！"
+        val: Schedule = LinDecay(val_init, val_decay_ratio, val_warmup_iters, val_trans_iters)
+
+    return as_schedule(val).make()
 
 
 class DefMARL(Algorithm):
@@ -40,13 +56,32 @@ class DefMARL(Algorithm):
             critic_gnn_layers: int = 2,
             Vh_gnn_layers: int = 1,
             gamma: float = 0.99,
-            lr_actor: float = 1e-5,
-            lr_critic: float = 1e-5,
+
+            lr_actor: float = 3e-4,
+            lr_actor_decay: bool = False,
+            lr_actor_init: Optional[float] = None,
+            lr_actor_decay_ratio: Optional[float] = None,
+            lr_actor_warmup_iters: Optional[int] = None,
+            lr_actor_trans_iters: Optional[int] = None,
+
+            lr_critic: float = 1e-3,
+            lr_critic_decay: bool = False,
+            lr_critic_init: Optional[float] = None,
+            lr_critic_decay_ratio: Optional[float] = None,
+            lr_critic_warmup_iters: Optional[int] = None,
+            lr_critic_trans_iters: Optional[int] = None,
+
+            coef_ent: float = 1e-2,
+            coef_ent_decay: bool = False,
+            coef_ent_init: Optional[float] = None,
+            coef_ent_decay_ratio: Optional[float] = None,
+            coef_ent_warmup_iters: Optional[int] = None,
+            coef_ent_trans_iters: Optional[int] = None,
+
             batch_size: int = 8192,
             epoch_ppo: int = 1,
             clip_eps: float = 0.25,
             gae_lambda: float = 0.95,
-            coef_ent: float = 1e-2,
             max_grad_norm: float = 2.0,
             seed: int = 0,
             use_rnn: bool = True,
@@ -54,8 +89,8 @@ class DefMARL(Algorithm):
             rnn_step: int = 16,
             rollout_length: Optional[int] = None,
             use_lstm: bool = False,
-            coef_ent_schedule: bool = False,
             use_prev_init: bool = False,
+            iter_index: int = 0,
             **kwargs
     ):
         super(DefMARL, self).__init__(
@@ -71,13 +106,32 @@ class DefMARL(Algorithm):
         self.actor_gnn_layers = actor_gnn_layers
         self.critic_gnn_layers = critic_gnn_layers
         self.gamma = gamma
-        self.lr_actor = lr_actor
-        self.lr_critic = lr_critic
+
+        self.lr_actor_val = lr_actor
+        self.lr_actor_decay = lr_actor_decay
+        self.lr_actor_init = lr_actor_init
+        self.lr_actor_decay_ratio = lr_actor_decay_ratio
+        self.lr_actor_warmup_iters = lr_actor_warmup_iters
+        self.lr_actor_trans_iters = lr_actor_trans_iters
+
+        self.lr_critic_val = lr_critic
+        self.lr_critic_decay = lr_critic_decay
+        self.lr_critic_init = lr_critic_init
+        self.lr_critic_decay_ratio = lr_critic_decay_ratio
+        self.lr_critic_warmup_iters = lr_critic_warmup_iters
+        self.lr_critic_trans_iters = lr_critic_trans_iters
+
+        self.coef_ent_val = coef_ent
+        self.coef_ent_decay = coef_ent_decay
+        self.coef_ent_init = coef_ent_init
+        self.coef_ent_decay_ratio = coef_ent_decay_ratio
+        self.coef_ent_warmup_iters = coef_ent_warmup_iters
+        self.coef_ent_trans_iters = coef_ent_trans_iters
+
         self.batch_size = batch_size
         self.epoch_ppo = epoch_ppo
         self.clip_eps = clip_eps
         self.gae_lambda = gae_lambda
-        self.coef_ent = coef_ent
         self.max_grad_norm = max_grad_norm
         self.seed = seed
         self.rollout_length = rollout_length
@@ -87,8 +141,19 @@ class DefMARL(Algorithm):
         self.use_lstm = use_lstm
         self.z_min = -env.reward_max
         self.z_max = -env.reward_min
-        self.coef_ent_schedule = coef_ent_schedule
         self.use_prev_init = use_prev_init
+        self.start_iter_index = iter_index
+        self.iter_index = iter_index
+
+        self.lr_actor_sched = val_to_optax_schedule(self.lr_actor_val, self.lr_actor_decay, self.lr_actor_init,
+            self.lr_actor_decay_ratio, self.lr_actor_warmup_iters, self.lr_actor_trans_iters)
+        self.lr_critic_sched = val_to_optax_schedule(self.lr_critic_val, self.lr_critic_decay, self.lr_critic_init,
+            self.lr_critic_decay_ratio, self.lr_critic_warmup_iters, self.lr_critic_trans_iters)
+        self.coef_ent_sched = val_to_optax_schedule(self.coef_ent_val, self.coef_ent_decay, self.coef_ent_init,
+            self.coef_ent_decay_ratio, self.coef_ent_warmup_iters, self.coef_ent_trans_iters)
+        self.policy_tx = get_default_tx(self.lr_actor_sched)
+        self.critic_tx = get_default_tx(self.lr_critic_sched)
+        self.Vh_tx = get_default_tx(self.lr_critic_sched)
 
         # set nominal graph for initialization of the neural networks
         nominal_graph = GraphsTuple(
@@ -135,13 +200,18 @@ class DefMARL(Algorithm):
         policy_params = self.policy.dist.init(
             policy_key, nominal_graph, self.init_rnn_state, self.n_agents, self.nominal_z
         )
-        policy_optim = optax.adam(learning_rate=lr_actor)
-        self.policy_optim = optax.apply_if_finite(policy_optim, 1_000_000)
+        #policy_optim = optax.adam(learning_rate=lr_actor)
+        #self.policy_optim = optax.apply_if_finite(policy_optim, 1_000_000)
         self.policy_train_state = TrainState.create(
             apply_fn=self.policy.sample_action,
             params=policy_params,
-            tx=self.policy_optim
+            tx=self.policy_tx
         )
+        #self.policy_train_state = policy_train_state.replace(
+            #opt_state=InjectStatefulHyperparamsState(
+                #inner_state=policy_train_state.opt_state.inner_state,
+                #hyperparams=policy_train_state.opt_state.hyperparams.replace(
+                    #step=jnp.array(self.start_iter_index, dtype=jnp.int32))))
 
         # set up PPO critic
         self.critic = ValueNet(
@@ -172,13 +242,17 @@ class DefMARL(Algorithm):
         critic_key, key = jr.split(key)
         critic_params = self.critic.net.init(
             critic_key, nominal_graph, self.init_Vl_rnn_state, self.n_agents, self.nominal_z[0][None, :])
-        critic_optim = optax.adam(learning_rate=lr_critic)
-        self.critic_optim = optax.apply_if_finite(critic_optim, 1_000_000)
+        # critic_optim = optax.adam(learning_rate=lr_critic)
+        # self.critic_optim = optax.apply_if_finite(critic_optim, 1_000_000)
         self.critic_train_state = TrainState.create(
             apply_fn=self.critic.get_value,
             params=critic_params,
-            tx=self.critic_optim
+            tx=self.critic_tx
         )
+        #self.critic_train_state = critic_train_state.replace(
+            #opt_state=critic_train_state.opt_state.replace(
+                #hyperparams=critic_train_state.opt_state.hyperparams.replace(
+                    #step=jnp.array(self.start_iter_index, dtype=jnp.int32))))
 
         # set up constraint value net
         self.Vh = ValueNet(
@@ -208,13 +282,17 @@ class DefMARL(Algorithm):
 
         Vh_key, key = jr.split(key)
         Vh_params = self.Vh.net.init(Vh_key, nominal_graph, self.init_Vh_rnn_state, self.n_agents, self.nominal_z)
-        Vh_optim = optax.adam(learning_rate=lr_critic)
-        self.Vh_optim = optax.apply_if_finite(Vh_optim, 1_000_000)
+        # Vh_optim = optax.adam(learning_rate=lr_critic)
+        # self.Vh_optim = optax.apply_if_finite(Vh_optim, 1_000_000)
         self.Vh_train_state = TrainState.create(
             apply_fn=self.Vh.get_value,
             params=Vh_params,
-            tx=self.Vh_optim
+            tx=self.Vh_tx
         )
+        #self.Vh_train_state = Vh_train_state.replace(
+            #opt_state=Vh_train_state.opt_state.replace(
+                #hyperparams=Vh_train_state.opt_state.hyperparams.replace(
+                    #step=jnp.array(self.start_iter_index, dtype=jnp.int32))))
 
         # set up the root finder
         self.root_finder = RootFinder(
@@ -258,6 +336,18 @@ class DefMARL(Algorithm):
         self.memory = None
 
     @property
+    def lr_actor(self):
+        return self.lr_actor_sched(self.iter_index)
+
+    @property
+    def lr_critic(self):
+        return self.lr_critic_sched(self.iter_index)
+
+    @property
+    def coef_ent(self):
+        return self.coef_ent_sched(self.iter_index)
+
+    @property
     def config(self) -> dict:
         return {
             'cost_weight': self.cost_weight,
@@ -265,13 +355,32 @@ class DefMARL(Algorithm):
             'critic_gnn_layers': self.critic_gnn_layers,
             'gamma': self.gamma,
             'rollout_length': self.rollout_length,
-            'lr_actor': self.lr_actor,
-            'lr_critic': self.lr_critic,
+
+            'lr_actor_val': self.lr_actor_val,
+            'lr_actor_decay': self.lr_actor_decay,
+            'lr_actor_init': self.lr_actor_init,
+            'lr_actor_decay_ratio': self.lr_actor_decay_ratio,
+            'lr_actor_warmup_iters': self.lr_actor_warmup_iters,
+            'lr_actor_trans_iters': self.lr_actor_trans_iters,
+
+            'lr_critic_val': self.lr_critic_val,
+            'lr_critic_decay': self.lr_critic_decay,
+            'lr_critic_init': self.lr_critic_init,
+            'lr_critic_decay_ratio': self.lr_critic_decay_ratio,
+            'lr_critic_warmup_iters': self.lr_critic_warmup_iters,
+            'lr_critic_trans_iters': self.lr_critic_trans_iters,
+
+            'coef_ent_val': self.coef_ent_val,
+            'coef_ent_decay': self.coef_ent_decay,
+            'coef_ent_init': self.coef_ent_init,
+            'coef_ent_decay_ratio': self.coef_ent_decay_ratio,
+            'coef_ent_warmup_iters': self.coef_ent_warmup_iters,
+            'coef_ent_trans_iters': self.coef_ent_trans_iters,
+
             'batch_size': self.batch_size,
             'epoch_ppo': self.epoch_ppo,
             'clip_eps': self.clip_eps,
             'gae_lambda': self.gae_lambda,
-            'coef_ent': self.coef_ent,
             'max_grad_norm': self.max_grad_norm,
             'seed': self.seed,
             'use_rnn': self.use_rnn,
@@ -280,8 +389,8 @@ class DefMARL(Algorithm):
             'use_lstm': self.use_lstm,
             'z_min': self.z_min,
             'z_max': self.z_max,
-            'coef_ent_schedule': self.coef_ent_schedule,
-            'use_prev_init': self.use_prev_init
+            'use_prev_init': self.use_prev_init,
+            'iter_index': self.iter_index,
         }
 
     @property
@@ -350,14 +459,14 @@ class DefMARL(Algorithm):
             rollout_result = self.rollout_fn(params, rollout_key, init_graphs)
             return rollout_result
 
-    def update(self, rollouts: Rollout, step: int) -> dict:
+    def update(self, rollouts: Rollout, iter_index: int) -> dict:
         _, self.key = jr.split(self.key)
+        assert iter_index == self.iter_index
         critic_train_state, Vh_train_state, policy_train_state, update_info = self.pmap_update(
             self.critic_train_state,
             self.Vh_train_state,
             self.policy_train_state,
             rollouts,
-            step
         )
         critic_train_state_single = jtu.tree_map(lambda x: x[0], critic_train_state)
         Vh_train_state_single = jtu.tree_map(lambda x: x[0], Vh_train_state)
@@ -369,6 +478,12 @@ class DefMARL(Algorithm):
         self.policy_train_state = policy_train_state_single
         if self.use_prev_init:
             self.memory = rollout_single
+
+        update_info_single = update_info_single | {'hyper/lr_actor': self.lr_actor,
+                                                   'hyper/lr_critic': self.lr_critic,
+                                                   'hyper/coef_ent': self.coef_ent}
+        self.iter_index += 1
+
         return update_info_single
 
     @ft.partial(jax.pmap, in_axes=(None, None, None, None, 0, None), axis_name='n_gpu', static_broadcasted_argnums=(0,))
@@ -376,8 +491,7 @@ class DefMARL(Algorithm):
                     critic_train_state: TrainState,
                     Vh_train_state: TrainState,
                     policy_train_state: TrainState,
-                    rollout: Rollout,
-                    step: int):
+                    rollout: Rollout):
         assert rollout.dones.shape[0] * rollout.dones.shape[1] >= self.batch_size
         for i_epoch in range(self.epoch_ppo):
             idx = np.arange(rollout.dones.shape[0])
@@ -598,8 +712,8 @@ class DefMARL(Algorithm):
                                                                   'critic/grad_norm': grad_Vl_norm,
                                                                   'critic/grad_Vh_norm': grad_Vh_norm})
 
-    def save(self, save_dir: str, step: int, params_to_save: dict = None):
-        model_dir = os.path.join(save_dir, str(step))
+    def save(self, save_dir: str, iter: int, params_to_save: dict = None):
+        model_dir = os.path.join(save_dir, str(iter))
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
         if params_to_save is not None:
@@ -611,8 +725,8 @@ class DefMARL(Algorithm):
             pickle.dump(self.critic_train_state.params, open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
             pickle.dump(self.Vh_train_state.params, open(os.path.join(model_dir, 'Vh.pkl'), 'wb'))
 
-    def load(self, load_dir: str, step: int):
-        path = os.path.join(load_dir, str(step))
+    def load(self, load_dir: str, iter: int):
+        path = os.path.join(load_dir, str(iter))
 
         self.policy_train_state = \
             self.policy_train_state.replace(params=pickle.load(open(os.path.join(path, 'actor.pkl'), 'rb')))

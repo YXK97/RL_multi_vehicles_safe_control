@@ -45,7 +45,7 @@ class MVELaneChangeAndOverTake(MVE):
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # 默认范围，用于指示正常工作的状态范围
         "rollout_state_range": jnp.array([-120., 120., -10., 10., -100., 100., -100., 100., 0., 360., -INF, INF, -7., 7.,
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # rollout过程中的限制，强制约束
-        "rollout_state_b_range": jnp.array([-INF, INF, -INF, INF, 0., 100., -INF, INF, -INF, INF, -INF, INF, -INF, INF,
+        "rollout_state_b_range": jnp.array([-INF, INF, -INF, INF, 10., 100., -INF, INF, -INF, INF, -INF, INF, -INF, INF,
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # rollout过程中在车身坐标系下状态约束，主要对纵向速度有约束，动力学模型不允许倒车
         "agent_init_state_range": jnp.array([-100., -100., -1.5, 1.5, 0., 80., 0., 0., 0., 0., 0., 0., 0., 0.,
         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]),
@@ -147,7 +147,9 @@ class MVELaneChangeAndOverTake(MVE):
                 tmp_state = MVEEnvState(this_candidates, this_candidates, empty_obsts)
                 tmp_graph = self.get_graph(tmp_state, obst_as_agent=True)
                 cost = self.get_cost(tmp_graph)
-                return jnp.max(cost) > - 0.1
+                candidates_non_valid = jnp.max(cost) > - 0.1
+                # jax.debug.print("obst_candidates_non_valid={candidates_non_valid}", candidates_non_valid=candidates_non_valid)
+                return candidates_non_valid
 
             def get_valid_obsts(state_range, key):
                 use_key, this_key = jr.split(key, 2)
@@ -189,7 +191,9 @@ class MVELaneChangeAndOverTake(MVE):
             tmp_state = MVEEnvState(this_candidates, this_candidates, obsts)
             tmp_graph = self.get_graph(tmp_state)
             cost = self.get_cost(tmp_graph)
-            return jnp.max(cost) > - 0.1
+            candidates_non_valid = jnp.max(cost) > - 0.1
+            # jax.debug.print("agent_candidates_non_valid={candidates_non_valid}", candidates_non_valid=candidates_non_valid)
+            return candidates_non_valid
 
         def get_valid_agent(state_range, key, obsts):
             use_key1, use_key2, this_key = jr.split(key, 3)
@@ -370,7 +374,7 @@ class MVELaneChangeAndOverTake(MVE):
             a_path, jnp.stack([ones, a_x, a_x**2, a_x**3, a_x**4, a_x**5], axis=1)))
         a2_paths_pos = jnp.stack([a_x, a_paths_y], axis=1)
         a_dist2paths = jnp.linalg.norm(a2_paths_pos - a2_pos, axis=-1)
-        reward -= (a_dist2paths.mean()) * 0.0001
+        reward -= (a_dist2paths.mean()) * 0.0005
         reward -= jnp.where(a_dist2paths > self.params["dist2path_bias"], 1., 0.).mean() * 0.0005
         # 角度奖励
         a_theta_grad = a_theta * jnp.pi / 180
@@ -380,8 +384,7 @@ class MVELaneChangeAndOverTake(MVE):
         a2_paths_vec = jnp.stack([ones, a_paths_derivative], axis=1) # 只能处理轨迹中车辆应当沿x轴正向前进的情况
         a2_paths_vec = a2_paths_vec / jnp.linalg.norm(a2_paths_vec, axis=1)
         a_theta2paths = jnp.einsum('ij,ij->i', a2_vec, a2_paths_vec)
-        reward += (a_theta2paths.mean() - 1) * 0.00005
-        reward -= jnp.where(a_theta2paths < self.params["theta2path_bias"], 1., 0.).mean() * 0.0005
+        reward += (a_theta2paths.mean() - 1) * 0.0002
 
         # 速度跟踪惩罚
         reward -= jnp.abs(a_v - a_goal_v).mean() * 0.0005
@@ -402,7 +405,6 @@ class MVELaneChangeAndOverTake(MVE):
 
         agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
         # agent之间的scaling factor
-        """
         if num_agents == 1:
             a_agent_cost = -jnp.ones((1,), dtype=jnp.float32)
         else :
@@ -418,11 +420,9 @@ class MVELaneChangeAndOverTake(MVE):
             alpha_matrix = alpha_matrix.at[j_pairs, i_pairs].set(alpha_pairs)
             # 步骤4：每个agent对应的行取最大值（即与其他agent的最小α，α越小越不安全）
             a_agent_cost = jnp.max(1-alpha_matrix, axis=1)
-        """
-        a_agent_cost = -jnp.ones((num_agents,), dtype=jnp.float32) # debug
+        # a_agent_cost = -jnp.ones((num_agents,), dtype=jnp.float32) # debug
 
         # agent 和 obst 之间的scaling factor
-        """
         if num_obsts == 0:
             a_obst_cost = -jnp.ones((num_agents,), dtype=jnp.float32)
         else:
@@ -435,11 +435,9 @@ class MVELaneChangeAndOverTake(MVE):
             alpha_pairs = jax.vmap(scaling_calc, in_axes=(0, 0))(state_i_pairs, state_j_pairs)
             alpha_matrix = alpha_pairs.reshape((num_agents, num_obsts))
             a_obst_cost = jnp.max(1-alpha_matrix, axis=1)
-        """
-        a_obst_cost = -jnp.ones((num_agents,), dtype=jnp.float32) # debug
+        # a_obst_cost = -jnp.ones((num_agents,), dtype=jnp.float32) # debug
 
         # agent 和 bound 之间的scaling factor，只对y方向有约束
-        """
         state_range = self.params["default_state_range"]
         yl = state_range[2]
         A = jnp.array([[0., 1.]])
@@ -450,9 +448,9 @@ class MVELaneChangeAndOverTake(MVE):
         A = jnp.array([[0., -1.]])
         b = jnp.array([-yh])
         a_bound_yh_cost = 1 - jax.vmap(scaling_calc_bound, in_axes=(0, None, None))(agent_states, A, b)
-        """
-        a_bound_yl_cost = -jnp.ones((num_agents,), dtype=jnp.float32)
-        a_bound_yh_cost = -jnp.ones((num_agents,), dtype=jnp.float32)
+
+        # a_bound_yl_cost = -jnp.ones((num_agents,), dtype=jnp.float32) # debug
+        # a_bound_yh_cost = -jnp.ones((num_agents,), dtype=jnp.float32) # debug
 
         cost = jnp.stack([a_agent_cost, a_obst_cost, a_bound_yl_cost, a_bound_yh_cost], axis=1)
         assert cost.shape == (num_agents, self.n_cost)
@@ -477,10 +475,6 @@ class MVELaneChangeAndOverTake(MVE):
                                     "==================== \n ",
                                     agent_states=agent_states,
                                     cost=cost)
-
-        with open("/media/data2/yxk/RL_multi_vehicles_safe_control/logs/jax_log.txt", "w", encoding="utf-8") as f:
-            with redirect_stdout(f), redirect_stderr(f):
-                jax_print()
         """
 
         return cost
