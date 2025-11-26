@@ -176,8 +176,6 @@ class Trainer:
             return  reward_mean, reward_final, cost, unsafe_frac
 
         for iter, iter_key in enumerate(all_iters_keys,start=self.start_iter):
-            if iter == 2:
-                print('debug')
             # 在eval/collect/update前断开参数追踪
             current_params = jax.lax.stop_gradient(self.algo.params)
             # evaluate the algorithm
