@@ -28,7 +28,7 @@ def train(args):
 
     # set up environment variables and seed
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    if args.debug:
+    if args.debug or args.disable_wandb:
         os.environ["WANDB_MODE"] = "disabled"
     elif not is_connected():
         os.environ["WANDB_MODE"] = "offline"
@@ -224,6 +224,7 @@ def main():
     parser.add_argument("--from-iter", type=int, default=None)
     parser.add_argument("--visible-devices", type=str, default=None)
     parser.add_argument("--use-proxy", action="store_true", default=False)
+    parser.add_argument("--disable-wandb", action="store_true", default=False)
 
 
     # learning rate and entropy coefficient
