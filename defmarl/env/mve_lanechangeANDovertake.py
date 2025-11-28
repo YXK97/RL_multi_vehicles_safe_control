@@ -27,13 +27,14 @@ class MVELaneChangeAndOverTake(MVE):
     环境为两车道，障碍车均沿车道作匀速直线运动"""
 
     PARAMS = {
-        "ego_lf": 1.2, # m
-        "ego_lr": 1.5, # m
+        # 法拉利monza参数
+        "ego_lf": 1.234, # m
+        "ego_lr": 1.022, # m
         "ego_bb_size": jnp.array([4.2, 1.7]), # bounding box的[width, height] m
-        "ego_m": 1400., # kg
-        "ego_Iz": 2500., # kg*m^2
-        "ego_Cf": 28000., # N/rad
-        "ego_Cr": 27000., # N/rad
+        "ego_m": 1008., # kg
+        "ego_Iz": 2031., # kg*m^2
+        "ego_Cf": 117440., # N/rad
+        "ego_Cr": 144930., # N/rad
         "comm_radius": 30,
         "obst_bb_size": jnp.array([4.18, 1.99]), # bounding box的[width, height] m
 
@@ -250,6 +251,7 @@ class MVELaneChangeAndOverTake(MVE):
 
     @override
     def agent_step_euler(self, aS_agent_states: AgentState, ad_action: Action) -> AgentState:
+        """对agent，使用3-DOF自行车动力学模型"""
         assert ad_action.shape == (self.num_agents, self.action_dim)
         assert aS_agent_states.shape == (self.num_agents, self.state_dim)
         convert_vec_s = jnp.array([1, 1, 3.6, 3.6, 180/jnp.pi, 180/jnp.pi]) # eg. km/h / convert_vec -> m/s
@@ -284,8 +286,8 @@ class MVELaneChangeAndOverTake(MVE):
         lf = self.params["ego_lf"] # m
         lr = self.params["ego_lr"] # m
         Iz = self.params["ego_Iz"] # kg*m^2
-        Cf = self.params["ego_Cf"] # N/rad
-        Cr = self.params["ego_Cr"] # N/rad
+        Cf = 2*self.params["ego_Cf"] # N/rad，自行车模型需要将轮胎的侧偏刚度×2以代表轴刚度
+        Cr = 2*self.params["ego_Cr"] # N/rad
 
         # 车辆3自由度control affine(小转向角近似)动力学模型 状态更新
         as_f = jnp.stack([a_vx_b_metric,
@@ -398,7 +400,7 @@ class MVELaneChangeAndOverTake(MVE):
         reward += (a_theta2paths.mean() - 1) * 0.001
 
         # 速度跟踪惩罚
-        reward -= jnp.abs(a_vx_b - a_goal_v).mean() * 0.001
+        reward -= jnp.abs(a_vx_b - a_goal_v).mean() * 0.0005
 
         # 动作惩罚
         reward -= (ad_action[:, 0]**2).mean() * 0.00005
