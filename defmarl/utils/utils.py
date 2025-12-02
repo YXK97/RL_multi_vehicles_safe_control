@@ -203,3 +203,14 @@ def calc_2d_rot_matrix(angle: float) -> Array:
     angle = angle * jnp.pi / 180
     return jnp.array([[jnp.cos(angle), -jnp.sin(angle)],
                       [jnp.sin(angle), jnp.cos(angle)]])
+
+
+def parse_jax_array(s: str) -> jnp.ndarray:
+    """定义解析函数：将字符串转为jax.numpy数组"""
+    s = s.replace(' ', '')  # 去除所有空格
+    if ';' in s:
+        rows = s.split(';')
+        arr = [row.split(',') for row in rows]
+    else:
+        arr = s.split(',')
+    return jnp.array(arr, dtype=jnp.float32)
