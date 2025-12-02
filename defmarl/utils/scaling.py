@@ -54,7 +54,7 @@ def filter_ray_direction(k2_intersections: Array, O: Pos2d, V: Pos2d, fill: Pos2
 def filter_in_bound(k2_intersections: Array, A, b, fill: Pos2d) -> Array:
     """筛选满足Ax<=b的点"""
     def _single_in_bound(intersection: Pos2d, A, b) -> bool:
-        return (jnp.dot(A, intersection) <= (b+1e-4)).all()
+        return (jnp.dot(A, intersection)-b <= 1e-4).all()
     k_in_bound = jax.vmap(_single_in_bound, in_axes=(0, None, None))(k2_intersections, A, b)
 
     return jnp.where(k_in_bound[:, None], k2_intersections, fill)
