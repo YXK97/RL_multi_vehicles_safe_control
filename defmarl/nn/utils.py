@@ -63,7 +63,7 @@ def wd_mask(params):
 
 def optim(learning_rate: float, wd: float, eps: float):
     opt = optax.adamw(learning_rate, eps=eps, weight_decay=wd, mask=wd_mask)
-    opt = optax.apply_if_finite(opt, 100)
+    opt = optax.apply_if_finite(opt, 1_000_000)
     return opt
 
 
