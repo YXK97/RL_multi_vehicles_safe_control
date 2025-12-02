@@ -7,6 +7,9 @@ import ipdb
 import numpy as np
 import yaml
 
+from defmarl.utils.utils import parse_jax_array
+
+
 def test(args):
     if args.visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.visible_devices
@@ -19,7 +22,7 @@ def test(args):
     from defmarl.env import make_env
     from defmarl.trainer.data import Rollout
     from defmarl.trainer.utils import eval_rollout
-    from defmarl.utils.utils import jax_jit_np, jax_vmap
+    from defmarl.utils.utils import jax_jit_np, jax_vmap, parse_jax_array
 
     n_gpu = jax.local_device_count()
     print(f"> Running test.py {args}")
@@ -181,7 +184,7 @@ def main():
     # optional arguments
     parser.add_argument("--epi", type=int, default=5)
     parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--from_step", type=int, default=None)
+    parser.add_argument("--from-step", type=int, default=None)
     parser.add_argument("-n", "--num-agents", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--env", type=str, default=None)
@@ -194,7 +197,8 @@ def main():
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--dpi", type=int, default=100)
     parser.add_argument("-z", type=str, default=None)
-    parser.add_argument("--area-size", type=float, default=None)
+    parser.add_argument("--area-size", type=parse_jax_array, default=None,
+                        help='输入jax数组，一维用逗号分隔（如10,20），二维用分号+逗号（如10,20;30,40）')
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--visible-devices", type=str, default=None)
 
