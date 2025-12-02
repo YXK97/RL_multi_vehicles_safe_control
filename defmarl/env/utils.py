@@ -142,3 +142,29 @@ def get_node_goal_rng(
         cond_fun=reset_not_terminate, body_fun=reset_body, init_val=(0, key, states, goals))
 
     return states, goals
+
+def process_lane_centers(y_state_range: Array, lane_width: float) -> Array:
+    """根据输入的y坐标范围和车道宽度，解析所有车道中心线的位置并整合进一个数组之中"""
+    yh = y_state_range[1]
+    yl = y_state_range[0]
+    n = jnp.floor((yh-yl)/lane_width).astype(int)
+    i = jnp.arange(start=1, stop=n+1, step=1, dtype=int)
+    c_ycs = yh - lane_width*(i-1/2)
+    return c_ycs
+
+def process_lane_marks(y_state_range: Array, lane_width: float) -> Tuple[Array, Array|None]:
+    """根据输入的y坐标范围和车道宽度，解析所有车道边界的位置并整合进两个数组之中，第一个输出为道路边界，第二个输出为车道线（虚线）"""
+    yh = y_state_range[1]
+    yl = y_state_range[0]
+    n = jnp.floor((yh - yl) / lane_width).astype(int)
+    assert n>=1
+    i = jnp.arange(start=1, stop=n+1, step=1, dtype=int)
+    scatters = yh - lane_width*i
+    if scatters[-1] == yl:
+        scatters = scatters[:-1]
+    bolds = y_state_range
+    if scatters.shape[0] == 0:
+        return bolds, None
+    else:
+        return bolds, scatters
+
