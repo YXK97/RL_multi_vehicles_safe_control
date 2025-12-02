@@ -13,6 +13,7 @@ from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
 
 from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
+from .utils import process_lane_centers, process_lane_marks
 from ..trainer.data import Rollout
 from ..utils.graph import EdgeBlock, GetGraph, GraphsTuple
 from ..utils.typing import Action, Reward, Cost, Array, State, Path, AgentState, ObstState, Done, Info
@@ -24,17 +25,17 @@ INF = jnp.inf
 class MVELaneChangeAndOverTake(MVE):
     """该任务使用agent位姿和预设轨迹的偏移量、加减速度和方向盘转角的大小作为的reward的度量，
     scaling factor作为cost的度量，每个agent分配一个goal并规划出一条轨迹（五次多项式），
-    环境为两车道，障碍车均沿车道作匀速直线运动"""
+    环境为四车道，障碍车均沿车道作匀速直线运动"""
 
     PARAMS = {
-        # 法拉利monza参数
-        "ego_lf": 1.234, # m
-        "ego_lr": 1.022, # m
+        # 别克1949参数
+        "ego_lf": 1.488, # m
+        "ego_lr": 1.712, # m
         "ego_bb_size": jnp.array([4.2, 1.7]), # bounding box的[width, height] m
-        "ego_m": 1008., # kg
-        "ego_Iz": 2031., # kg*m^2
-        "ego_Cf": 117440., # N/rad
-        "ego_Cr": 144930., # N/rad
+        "ego_m": 2045., # kg
+        "ego_Iz": 5428., # kg*m^2
+        "ego_Cf": 77850., # N/rad
+        "ego_Cr": 76510., # N/rad
         "comm_radius": 30,
         "obst_bb_size": jnp.array([4.18, 1.99]), # bounding box的[width, height] m
 
@@ -42,25 +43,26 @@ class MVELaneChangeAndOverTake(MVE):
         # bbw_l, bbw_h, bbh_l, bbh_h, a0_l, a0_h, a1_l, a1_h, a2_l, a2_h, a3_l, a3_h, a4_l, a4_h, a5_l, a5_h]
         # 单位：x,y,bbw,bbh: m  vx,vy: km/h,  θ: °, dθdt: °/s, 其它: 无
         # 速度约束通过车身坐标系对纵向速度约束来进行
-        "default_state_range": jnp.array([-100., 100., -3., 3., -INF, INF, -INF, INF, 0., 360., -INF, INF,
+        "default_state_range": jnp.array([-100., 100., -6., 6., -INF, INF, -INF, INF, 0., 360., -INF, INF,
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # 默认范围，用于指示正常工作的状态范围
-        "rollout_state_range": jnp.array([-120., 120., -10., 10., -INF, INF, -INF, INF, 0., 360., -INF, INF,
+        "rollout_state_range": jnp.array([-120., 100., -100., 100., -INF, INF, -INF, INF, 0., 360., -INF, INF,
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # rollout过程中的限制，强制约束
-        "rollout_state_b_range": jnp.array([-INF, INF, -INF, INF, 10., 100., -INF, INF, -INF, INF, -INF, INF,
+        "rollout_state_b_range": jnp.array([-INF, INF, -INF, INF, 20., 100., -INF, INF, -INF, INF, -INF, INF,
         -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF, -INF, INF]), # rollout过程中在车身坐标系下状态约束，主要对纵向速度有约束，动力学模型不允许倒车
-        "agent_init_state_range": jnp.array([-100., -70., -1.5, 1.5, 0., 80., 0., 0., 0., 0., 0., 0.,
+        "agent_init_state_range": jnp.array([-120., -80., -6., 6., 30., 80., 0., 0., 0., 0., 0., 0.,
         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]),
-        # 用于agent初始化的状态范围，其中y坐标为离散约束，agent初始化的y坐标只能位于-1.5或1.5
-        "goal_state_range": jnp.array([100., 100., -1.5, 1.5, 60., 100., 0., 0., 0., 0., 0., 0.,
+        # 用于agent初始化的状态范围，其中y坐标为离散约束，agent初始化的y坐标只能位于-4.5、-1.5、1.5或4.5
+        "goal_state_range": jnp.array([100., 150., -6., 6., 40., 90., 0., 0., 0., 0., 0., 0.,
         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]),
-        # 随机生成goal时的状态范围，其中y坐标为离散约束，goal的y坐标只能位于-1.5或1.5，xy和theta仅用于初始化轨迹参数，轨迹初始化后goal除了
+        # 随机生成goal时的状态范围，其中y坐标为离散约束，goal的y坐标只能位于-4.5、-1.5、1.5或4.5，xy和theta仅用于初始化轨迹参数，轨迹初始化后goal除了
         # vx其余状态均置0，不参与通信计算，vx仅作为速率目标参与通信计算
-        "obst_state_range": jnp.array([-120., 80., -1.5, 1.5, 10., 120., 0., 0., 0., 0., 0., 0.,
+        "obst_state_range": jnp.array([-150., 50., -6., 6., 10., 120., 0., 0., 0., 0., 0., 0.,
         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]),
-        # 随机生成obst时的状态范围，其中y坐标为离散约束，obst的y坐标只能位于-1.5或1.5，obst沿x轴正向以vx作匀速直线运动
+        # 随机生成obst时的状态范围，其中y坐标为离散约束，obst的y坐标只能位于-4.5、-1.5、1.5或4.5，obst沿x轴正向以vx作匀速直线运动
         # 以上agent、goal、obst初始化的状态约束参数均只有前6项有效
 
-        "n_obsts": 2, # 本环境使用两个obst，每根车道一个
+        "n_obsts": 2, # 本环境使用两个obst
+        "lane_width": 3, # 车道宽度，m
 
         "dist2path_bias": 0.1, # 用于判断agent是否沿轨迹行驶 m
         "theta2path_bias": 0.995, # 用于判断agent航向角是否满足轨迹的要求，即agent方向向量和轨迹方向向量夹角的cos是否大于0.995（是否小于5度）
@@ -68,7 +70,8 @@ class MVELaneChangeAndOverTake(MVE):
     }
     PARAMS.update({
         "ego_radius": jnp.linalg.norm(PARAMS["ego_bb_size"]/2), # m
-        "ego_L": PARAMS["ego_lf"]+PARAMS["ego_lr"] # m
+        "ego_L": PARAMS["ego_lf"]+PARAMS["ego_lr"], # m
+        "lane_centers": process_lane_centers(PARAMS["default_state_range"][2:4], PARAMS["lane_width"]), # 车道中心线y坐标 m
     })
     if "obst_bb_size" in PARAMS and PARAMS["obst_bb_size"].shape == (2,):
         PARAMS.update({"obst_radius": jnp.linalg.norm(PARAMS["obst_bb_size"]/2)})
@@ -76,9 +79,9 @@ class MVELaneChangeAndOverTake(MVE):
     def __init__(self,
                  num_agents: int,
                  area_size: Optional[float] = None,
-                 max_step: int = 512,
+                 max_step: int = 128,
                  max_travel: Optional[float] = None,
-                 dt: float = 0.025,
+                 dt: float = 0.05,
                  params: dict = None
                  ):
         area_size = MVELaneChangeAndOverTake.PARAMS["rollout_state_range"][:4] if area_size is None else area_size
@@ -132,20 +135,21 @@ class MVELaneChangeAndOverTake(MVE):
         """先生成obstacle，将obstacle视为agent，通过cost计算是否valid
         再生成agent和goal，将之前生成的obstacle还原为obstacle，利用cost计算是否valid
         最后使用五次多项式拟合初始路径"""
-        x_l_idx = 0; x_h_idx = 1; y_l_idx = 2; y_h_idx = 3; vx_l_idx = 4; vx_h_idx = 5
+        x_l_idx = 0; x_h_idx = 1; vx_l_idx = 4; vx_h_idx = 5
+        c_ycs = self.params["lane_centers"]
         obst_key, goal_key, agent_key = jr.split(key, 3)
 
         if self.params["n_obsts"] > 0:
             # randomly generate obstacles
             def get_obst(inp):
                 this_key, state_range, _ = inp
-                use_key, new_key = jr.split(this_key, 2)
+                use_key, use_key2, new_key = jr.split(this_key, 3)
                 o_xvx = jr.uniform(use_key, shape=(self.params["n_obsts"], 2),
                             minval=jnp.stack([state_range[x_l_idx], state_range[vx_l_idx]], axis=0),
                             maxval=jnp.stack([state_range[x_h_idx], state_range[vx_h_idx]], axis=0))
-                o_y = obst_state_range[jnp.array([y_l_idx, y_h_idx])]
+                o_y = jr.choice(use_key2, c_ycs, shape=(self.params["n_obsts"], 1))
                 o_other_0 = jnp.zeros((self.params["n_obsts"], self.state_dim-3), dtype=jnp.float32)
-                o_xyvx = jnp.insert(o_xvx, 1, o_y, axis=1)
+                o_xyvx = jnp.insert(o_xvx, jnp.array([1]), o_y, axis=1)
                 o_state = jnp.concatenate([o_xyvx, o_other_0], axis=1)
                 return new_key, state_range, o_state
 
@@ -161,13 +165,13 @@ class MVELaneChangeAndOverTake(MVE):
                 return candidates_non_valid
 
             def get_valid_obsts(state_range, key):
-                use_key, this_key = jr.split(key, 2)
+                use_key, use_key2, this_key = jr.split(key, 3)
                 o_xvx_can = jr.uniform(use_key, shape=(self.params["n_obsts"], 2),
                                    minval=jnp.stack([state_range[x_l_idx], state_range[vx_l_idx]], axis=0),
                                    maxval=jnp.stack([state_range[x_h_idx], state_range[vx_h_idx]], axis=0))
-                o_y_can = state_range[jnp.array([y_l_idx, y_h_idx])]
+                o_y_can = jr.choice(use_key2, c_ycs, shape=(self.params["n_obsts"], 1))
                 o_other_0_can = jnp.zeros((self.params["n_obsts"], self.state_dim - 3), dtype=jnp.float32)
-                o_xyvx_can = jnp.insert(o_xvx_can, 1, o_y_can, axis=1)
+                o_xyvx_can = jnp.insert(o_xvx_can, jnp.array([1]), o_y_can, axis=1)
                 o_state_can = jnp.concatenate([o_xyvx_can, o_other_0_can], axis=1)
                 _, _, valid_obsts = jax.lax.while_loop(non_valid_obst, get_obst, (this_key, state_range, o_state_can))
                 return valid_obsts
@@ -187,10 +191,9 @@ class MVELaneChangeAndOverTake(MVE):
             a_xvx = jr.uniform(use_key1, shape=(self.num_agents, 2),
                                minval=jnp.stack([state_range[x_l_idx], state_range[vx_l_idx]], axis=0),
                                maxval=jnp.stack([state_range[x_h_idx], state_range[vx_h_idx]], axis=0))
-            a_y = jr.choice(use_key2, state_range[jnp.array([y_l_idx, y_h_idx])],
-                            shape=(self.num_agents, 1))
+            a_y = jr.choice(use_key2, c_ycs, shape=(self.num_agents, 1))
             a_other_0 = jnp.zeros((self.num_agents, self.state_dim - 3), dtype=jnp.float32)
-            a_state = jnp.concatenate([jnp.insert(a_xvx, 1, a_y, axis=1), a_other_0], axis=1)
+            a_state = jnp.concatenate([jnp.insert(a_xvx, jnp.array([1]), a_y, axis=1), a_other_0], axis=1)
             # jax.debug.print("agent_key={new_key}", new_key=new_key)
             return new_key, state_range, a_state, obsts
 
@@ -209,10 +212,10 @@ class MVELaneChangeAndOverTake(MVE):
             a_xvx_can = jr.uniform(use_key1, shape=(self.num_agents, 2),
                                minval=jnp.stack([state_range[x_l_idx], state_range[vx_l_idx]], axis=0),
                                maxval=jnp.stack([state_range[x_h_idx], state_range[vx_h_idx]], axis=0))
-            a_y_can = jr.choice(use_key2, state_range[jnp.array([y_l_idx, y_h_idx])],
-                            shape=(self.num_agents, 1))
+            a_y_can = jr.choice(use_key2, c_ycs, shape=(self.num_agents,1))
             a_other_0_can = jnp.zeros((self.num_agents, self.state_dim - 3), dtype=jnp.float32)
-            a_state_can = jnp.concatenate([jnp.insert(a_xvx_can, 1, a_y_can, axis=1), a_other_0_can], axis=1)
+            a_xyvx_can = jnp.insert(a_xvx_can, jnp.array([1]), a_y_can, axis=1)
+            a_state_can = jnp.concatenate([a_xyvx_can, a_other_0_can], axis=1)
             _, _, valid_targets, _ = jax.lax.while_loop(non_valid_agent, get_agent,
                                     (this_key, state_range, a_state_can, obsts))
             # jax.debug.print("agent_key={new_key}", new_key=this_key)
@@ -223,10 +226,9 @@ class MVELaneChangeAndOverTake(MVE):
             a_xvx_can = jr.uniform(use_key1, shape=(self.num_agents, 2),
                                    minval=jnp.stack([state_range[x_l_idx], state_range[vx_l_idx]], axis=0),
                                    maxval=jnp.stack([state_range[x_h_idx], state_range[vx_h_idx]], axis=0))
-            a_y_can = jr.choice(use_key2, state_range[jnp.array([y_l_idx, y_h_idx])],
-                                shape=(self.num_agents, 1))
+            a_y_can = jr.choice(use_key2, c_ycs, shape=(self.num_agents, 1))
             a_other_0_can = jnp.zeros((self.num_agents, self.state_dim - 3), dtype=jnp.float32)
-            a_state = jnp.concatenate([jnp.insert(a_xvx_can, 1, a_y_can, axis=1), a_other_0_can], axis=1)
+            a_state = jnp.concatenate([jnp.insert(a_xvx_can, jnp.array([1]), a_y_can, axis=1), a_other_0_can], axis=1)
 
             return a_state
 
@@ -381,33 +383,31 @@ class MVELaneChangeAndOverTake(MVE):
         # 循迹奖励： 位置+角度
         # 位置奖励，只关注y方向控制误差
         a_x = a2_pos[:, 0]
+        a_y = a2_pos[:, 1]
         zeros = jnp.zeros_like(a_x)
         ones = jnp.ones_like(a_x)
         a_paths_y = (jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
             a_path, jnp.stack([ones, a_x, a_x**2, a_x**3, a_x**4, a_x**5], axis=1)))
         a2_paths_pos = jnp.stack([a_x, a_paths_y], axis=1)
-        a_dist2paths = jnp.linalg.norm(a2_paths_pos - a2_pos, axis=-1)
-        reward -= (a_dist2paths.mean()) * 0.005
-        reward -= jnp.where(a_dist2paths > self.params["dist2path_bias"], 1., 0.).mean() * 0.005
+        a_dist2paths = (a_y - a_paths_y)**2
+        reward -= (a_dist2paths.mean()) * 0.1
+        # reward -= jnp.where(a_dist2paths > self.params["dist2path_bias"], 1., 0.).mean() * 0.005
         # 角度奖励
         a_theta_grad = a_theta * jnp.pi / 180
         a2_vec = jnp.stack([jnp.cos(a_theta_grad), jnp.sin(a_theta_grad)], axis=1)
         a_paths_derivative = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
             a_path, jnp.stack([zeros, ones, 2*a_x, 3*a_x**2, 4*a_x**3, 5*a_x**4], axis=1))
         a2_paths_vec = jnp.stack([ones, a_paths_derivative], axis=1) # 只能处理轨迹中车辆应当沿x轴正向前进的情况
-        a2_paths_vec = a2_paths_vec / jnp.linalg.norm(a2_paths_vec, axis=1)
+        a2_paths_vec = a2_paths_vec / jnp.linalg.norm(a2_paths_vec, axis=1)[:, None]
         a_theta2paths = jnp.einsum('ij,ij->i', a2_vec, a2_paths_vec)
-        reward += (a_theta2paths.mean() - 1) * 0.001
+        reward += (a_theta2paths.mean() - 1) * 0.01
 
         # 速度跟踪惩罚
-        reward -= jnp.abs(a_vx_b - a_goal_v).mean() * 0.0005
+        reward -= ((a_vx_b - a_goal_v)**2).mean() * 0.0001
 
         # 动作惩罚
-        reward -= (ad_action[:, 0]**2).mean() * 0.00005
-        reward -= (ad_action[:, 1]**2).mean() * 0.00005
-
-        # 转向角中性奖励
-        reward -= jnp.where(ad_action[:, 1] > self.params["delta2mid_bias"], 1., 0.).mean() * 0.0001
+        reward -= (ad_action[:, 0]**2).mean() * 0.0005
+        reward -= (ad_action[:, 1]**2).mean() * 0.001
 
         return reward
 
@@ -418,6 +418,7 @@ class MVELaneChangeAndOverTake(MVE):
 
         agent_states = graph.type_states(type_idx=MVE.AGENT, n_type=num_agents)
         # agent之间的scaling factor
+        """
         if num_agents == 1:
             a_agent_cost = -jnp.ones((1,), dtype=jnp.float32)
         else :
@@ -433,7 +434,8 @@ class MVELaneChangeAndOverTake(MVE):
             alpha_matrix = alpha_matrix.at[j_pairs, i_pairs].set(alpha_pairs)
             # 步骤4：每个agent对应的行取最大值（即与其他agent的最小α，α越小越不安全）
             a_agent_cost = jnp.max(1-alpha_matrix, axis=1)
-        # a_agent_cost = -jnp.ones((num_agents,), dtype=jnp.float32) # debug
+        """
+        a_agent_cost = -jnp.ones((num_agents,), dtype=jnp.float32) # debug
 
         # agent 和 obst 之间的scaling factor
         if num_obsts == 0:
@@ -520,9 +522,12 @@ class MVELaneChangeAndOverTake(MVE):
         ax.axhline(y=self.area_size[3], linewidth=2, color='k')
 
         # 画车道线
-        ax.axhline(y=3, linewidth=1.5, color='b')
-        ax.axhline(y=0, linewidth=1, linestyle='--', color='b')
-        ax.axhline(y=-3, linewidth=1.5, color='b')
+        two_yms_bold, l_yms_scatter = process_lane_marks(self.params["default_state_range"][2:4], self.params["lane_width"])
+        ax.axhline(y=two_yms_bold[0], linewidth=1.5, color='b')
+        ax.axhline(y=two_yms_bold[1], linewidth=1.5, color='b')
+        if l_yms_scatter is not None:
+            for ym in l_yms_scatter:
+                ax.axhline(y=ym, linewidth=1, color='b', linestyle='--')
 
         # plot the first frame
         T_graph = rollout.graph
@@ -575,7 +580,7 @@ class MVELaneChangeAndOverTake(MVE):
         # state: x, y, vx, vy, θ, dθ/dt, δ, bb_w, bb_h, a0 ... a5
         agents_path = agents_state[:, 8:]
         a_xs = jax.vmap(lambda xl, xh: jnp.linspace(xl, xh, 100), in_axes=(0, 0))(
-            agents_pos[:, 0], 100 * jnp.ones_like(agents_pos[:, 0]))
+            agents_pos[:, 0], 300 * jnp.ones_like(agents_pos[:, 0]))
         ones = jnp.ones_like(a_xs)
         a_X = jnp.stack([ones, a_xs, a_xs**2, a_xs**3, a_xs**4, a_xs**5], axis=1)
         a_ys = jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(agents_path, a_X)
@@ -715,6 +720,7 @@ class MVELaneChangeAndOverTake(MVE):
         agent_pos = state.agent[:, :2]
         id_agent = jnp.arange(num_agents)
 
+        """
         # agent - agent connection
         pos_diff = agent_pos[:, None, :] - agent_pos[None, :, :]  # [i, j]: i -> j
         state_diff = state.agent[:, None, :] - state.agent[None, :, :]
@@ -722,6 +728,7 @@ class MVELaneChangeAndOverTake(MVE):
         dist += jnp.eye(dist.shape[1]) * (self.params["comm_radius"] + 1)
         agent_agent_mask = jnp.less(dist, self.params["comm_radius"])
         agent_agent_edges = EdgeBlock(state_diff, agent_agent_mask, id_agent, id_agent)
+        """
 
         # agent - goal connection
         agent_goal_edges = []
@@ -732,6 +739,7 @@ class MVELaneChangeAndOverTake(MVE):
             agent_goal_edges.append(EdgeBlock(agent_goal_feats_i[None, None, :], jnp.ones((1, 1)),
                                               jnp.array([i_agent]), jnp.array([i_agent + num_agents])))
 
+        """
         # agent - obstacle connection
         agent_obst_edges = []
         if num_obsts > 0:
@@ -744,6 +752,9 @@ class MVELaneChangeAndOverTake(MVE):
             agent_obst_edges = [EdgeBlock(state_diff, agent_obs_mask, id_agent, id_obs)]
 
         return [agent_agent_edges] + agent_goal_edges + agent_obst_edges
+        """
+
+        return agent_goal_edges # 跟踪任务debug
 
     def generate_path(self, env_state: MVEEnvState) -> Path:
         """根据起点和终点求解五次多项式并写入graph"""
