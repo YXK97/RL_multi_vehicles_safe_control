@@ -13,7 +13,7 @@ from matplotlib.animation import FuncAnimation
 from rich.progress import Progress, ProgressColumn
 from rich.text import Text
 
-from .typing import Array, Shape, BoolScalar
+from .typing import Array, Shape, BoolScalar, PathEff, AgentState, State
 
 
 def merge01(x):
@@ -199,10 +199,10 @@ def tree_where(cond: BoolScalar | bool, true_val: _PyTree, false_val: _PyTree) -
 
 @jax.jit
 def calc_2d_rot_matrix(angle: float) -> Array:
-    "计算二维平面的旋转矩阵，angle输入为degree"
+    "计算二维平面的旋转矩阵，angle输入为degree: xO = Q·xb"
     angle = angle * jnp.pi / 180
     return jnp.array([[jnp.cos(angle), -jnp.sin(angle)],
-                      [jnp.sin(angle), jnp.cos(angle)]])
+                      [jnp.sin(angle), jnp.cos(angle)]]) # Q
 
 
 def parse_jax_array(s: str) -> jnp.ndarray:
@@ -214,3 +214,140 @@ def parse_jax_array(s: str) -> jnp.ndarray:
     else:
         arr = s.split(',')
     return jnp.array(arr, dtype=jnp.float32)
+
+@jax.jit
+def calc_quintic_eff(starts: AgentState, terminals: AgentState) -> Tuple[PathEff, PathEff, PathEff]:
+     """根据起点和终点求解五次多项式，输出原始参数、一阶导参数和二阶导参数"""
+     zeros = jnp.zeros((starts.shape[0],), dtype=jnp.float32)
+     # state: x y vx vy θ dθdt bw bh
+     def A_b_create_and_solve(start, terminal) -> PathEff:
+         x0 = start[0]
+         x1 = terminal[0]
+         A = jnp.array([[1, x0, x0**2,   x0**3,    x0**4,    x0**5],
+                        [0,  1,  2*x0, 3*x0**2,  4*x0**3,  5*x0**4],
+                        [0,  0,     2,    6*x0, 12*x0**2, 20*x0**3],
+                        [1, x1, x1**2,   x1**3,    x1**4,    x1**5],
+                        [0,  1,  2*x1, 3*x1**2,  4*x1**3,  5*x1**4],
+                        [0,  0,     2,    6*x1, 12*x1**2, 20*x1**3],])
+         y0 = start[1]
+         y1 = terminal[1]
+         t0 = start[4]*jnp.pi/180
+         t1 = terminal[4]*jnp.pi/180
+         b = jnp.array([y0, jnp.tan(t0), 0, y1, jnp.tan(t1), 0])
+         coeff = jnp.linalg.solve(A, b)
+         return coeff
+     coeffs_f = jax.vmap(A_b_create_and_solve, in_axes=(0, 0))(starts, terminals)
+     coeffs_df = jnp.stack([coeffs_f[:,1],2*coeffs_f[:,2],3*coeffs_f[:,3],4*coeffs_f[:,4],5*coeffs_f[:,5],zeros], axis=1)
+     coeffs_ddf = jnp.stack([2*coeffs_f[:,2],6*coeffs_f[:,3],12*coeffs_f[:,4],20*coeffs_f[:,5],zeros,zeros], axis=1)
+     return coeffs_f, coeffs_df, coeffs_ddf
+
+@jax.jit
+def calc_linear_eff(starts: AgentState, terminals: AgentState) -> Tuple[PathEff, PathEff, PathEff]:
+     """根据起点和终点求解一次函数，输出原始参数、一阶导参数和二阶导参数"""
+     zeros = jnp.zeros((starts.shape[0],), dtype=jnp.float32)
+     # state: x y vx vy θ dθdt bw bh
+     def A_b_create_and_solve(start, terminal) -> PathEff:
+         x0 = start[0]
+         x1 = terminal[0]
+         A = jnp.array([[1, x0],
+                        [1, x1]])
+         y0 = start[1]
+         y1 = terminal[1]
+         b = jnp.array([y0, y1])
+         coeff = jnp.linalg.solve(A, b)
+         return coeff
+     coeffs_f = jax.vmap(A_b_create_and_solve, in_axes=(0, 0))(starts, terminals)
+     coeffs_df = jnp.stack([coeffs_f[:,1], zeros], axis=1)
+     coeffs_ddf = jnp.stack([zeros, zeros], axis=1)
+     return coeffs_f, coeffs_df, coeffs_ddf
+
+
+def const_f(constant: Array) -> Callable:
+    """构造常量函数"""
+    def f(x):
+        return constant
+    return f
+
+def linear_f(ai: Array) -> Callable:
+    """根据ai构建y=a0+a1x的一次函数"""
+    def f(x):
+        return ai[:,0][:, None] + ai[:, 1][:, None]*x
+    return f
+
+def quintic_polynomial_f(ai: Array) -> Callable:
+    """根据ai构建y=a0+a1x+a2x^2+a3x^3+a4x^4+a5x^5的五次函数"""
+    def f(x):
+        return (ai[:, 0][:, None] + ai[:, 1][:, None]*x + ai[:, 2][:, None]*x**2
+                + ai[:, 3][:, None]*x**3 + ai[:, 4][:, None]*x**4 + ai[:, 5][:, None]*x**5)
+    return f
+
+def sin_f(A:Array, w:Array, T:Array, B:Array) -> Callable:
+    """构建三角函数y=Asin(wx+T)+B"""
+    def f(x):
+        return A[:, None] * jnp.sin(w[:, None] * x + T[:, None]) + B[:, None]
+    return f
+
+def tri_sec_f(f_l: Callable, f_m: Callable, f_h: Callable, x1: Array, x2: Array) -> Callable:
+    """构造如下函数：
+        { f_l(x), x <= x1
+    y = { f_m(x), x1 < x <= x2
+        { f_h(x), x > x2
+    可处理向量化的x
+    """
+    def f(x):
+        return jnp.where(x <= x1, f_l(x),
+                         jnp.where(x > x2, f_h(x), f_m(x)))
+    return f
+
+def six_sec_f(f0: Callable, f1: Callable, f2: Callable, f3: Callable, f4: Callable, f5: Callable,
+              x0: Array, x1: Array, x2: Array, x3: Array, x4: Array) -> Callable:
+    """构造如下函数：
+        { f0(x), x <= x0
+        { f1(x), x0 < x <= x1
+    y = { f2(x), x1 < x <= x2
+        { f3(x), x2 < x <= x3
+        { f4(x), x3 < x <= x4
+        { f5(x), x > x4
+    可处理向量化的x
+    """
+    def f(x):
+        return jnp.where(x <= x0, f0(x),
+                jnp.where(x <= x1, f1(x),
+                 jnp.where(x <= x2, f2(x),
+                  jnp.where(x <= x3, f3(x),
+                   jnp.where(x <= x4, f4(x), f5(x))))))
+    return f
+
+@jax.jit
+def find_closest_goal_indices(as_agent_states: AgentState, ans_all_goals: State) -> jnp.ndarray:
+    """找到每个agent对应的最近goal的索引"""
+    a2_agent_coords = as_agent_states[:, :2]
+    an2_goal_coords = ans_all_goals[:, :, :2]
+    a12_agent_coords = a2_agent_coords[:, None, :]
+    an_sq_dists = jnp.sum((an2_goal_coords - a12_agent_coords) ** 2, axis=2)
+    a_indices = jnp.argmin(an_sq_dists, axis=1)
+
+    return a_indices
+
+def gen_i_j_pairs(m: float, n: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """一组m个物体和一组n个物体间生成有序索引对i_pairs和j_pairs，其中i可以等于j"""
+    i_grid, j_grid = jnp.meshgrid(jnp.arange(m), jnp.arange(n), indexing='ij')
+    i_flat = i_grid.flatten()
+    j_flat = j_grid.flatten()
+    return i_flat, j_flat
+
+def gen_i_j_pairs_no_identical(m: float, n: float) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """一组m个物体和一组n个物体间生成有序索引对i_pairs和j_pairs，其中i不能等于j"""
+    i_grid, j_grid = jnp.meshgrid(jnp.arange(m), jnp.arange(n), indexing='ij')
+    i_flat = i_grid.flatten()
+    j_flat = j_grid.flatten()
+    mask = i_flat != j_flat
+    i_pairs = i_flat[mask]
+    j_pairs = j_flat[mask]
+    return i_pairs, j_pairs
+
+@jax.jit
+def normalize_angle(angles: jnp.ndarray) -> jnp.ndarray:
+    """归一化角度到 [-180, 180]°，输入角度单位为°"""
+    angles_mod = jnp.mod(angles, 360)
+    return jnp.where(angles_mod > 180, angles_mod - 360, angles_mod)
