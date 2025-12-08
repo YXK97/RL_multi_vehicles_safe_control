@@ -688,8 +688,12 @@ class DefMARL(Algorithm):
                 ft.partial(self.scan_value, critic_params=critic_params, Vh_params=Vh_params)))(
                 bcT_rollout, Vl_rnn_state_inits, Vh_rnn_state_inits
             )
-            loss_Vl = jax.lax.pmean(optax.l2_loss(bcT_Vl, bcT_Ql).mean(), axis_name='n_gpu')
-            loss_Vh = jax.lax.pmean(optax.l2_loss(bcTah_Vh, bcTah_Qh).mean(), axis_name='n_gpu')
+            loss_Vl_device_can = optax.l2_loss(bcT_Vl, bcT_Ql)
+            loss_Vh_device_can = optax.l2_loss(bcTah_Vh, bcTah_Qh)
+            loss_Vl_device = jnp.where(loss_Vl_device_can < 1e9, loss_Vl_device_can, 0)
+            loss_Vh_device = jnp.where(loss_Vh_device_can < 1e9, loss_Vh_device_can, 0) # 降低safety计算过程中，由于各种计算方法误差导致的噪声
+            loss_Vl = jax.lax.pmean(loss_Vl_device.mean(), axis_name='n_gpu')
+            loss_Vh = jax.lax.pmean(loss_Vh_device.mean(), axis_name='n_gpu')
             gt_unsafe = jax.lax.pmean((bcTah_Qh > 1e-6).mean(), axis_name='n_gpu')
             info = {
                 'critic/loss': loss_Vl,
