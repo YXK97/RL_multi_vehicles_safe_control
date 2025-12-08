@@ -106,7 +106,7 @@ def scaling_calc(s1: State, s2: State) -> Array:
     scaling = jnp.array([mk_scaling.min(), nl_scaling.min()]).min()
 
     # 判断S1缩放中心是否在S2中
-    O_in_S2 = jnp.where((A2@O1-b2<=0).all(), -1., 1.)
+    O_in_S2 = jnp.where((A2@O1-b2 <= 1e-4).all(), -1., 1.)
 
     alpha = O_in_S2 * scaling
     return alpha
