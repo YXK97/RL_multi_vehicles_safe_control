@@ -15,7 +15,7 @@ from matplotlib.collections import LineCollection
 from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
 from ..trainer.data import Rollout
 from ..utils.graph import EdgeBlock, GetGraph, GraphsTuple
-from ..utils.typing import Action, Reward, Cost, Array, State, Path, Done, Info
+from ..utils.typing import Action, Reward, Cost, Array, State, Done, Info, PathEff
 from ..utils.utils import tree_index, MutablePatchCollection, save_anim
 from dpax.utils import scaling_calc_between_recs, scaling_calc_between_rec_and_hspace
 
@@ -223,7 +223,7 @@ class MVEPathTracking(MVE):
         y = agents_states[:, 1]
         zeros = jnp.zeros_like(x)
         ones = jnp.ones_like(x)
-        paths: Array[Path] = agents_nodes[:, 6:12]
+        paths: Array[PathEff] = agents_nodes[:, 6:12]
         # jax.debug.print("path coeff={coeff}", coeff=paths)
         paths_y = (jax.vmap(lambda a, x: jnp.dot(a, x), in_axes=(0, 0))(
             paths, jnp.stack([ones, x, x**2, x**3, x**4, x**5], axis=1)))
@@ -629,12 +629,12 @@ class MVEPathTracking(MVE):
 
         return [agent_agent_edges] + agent_goal_edges + agent_obst_edges
 
-    def generate_path(self, env_state: MVEEnvState) -> Path:
+    def generate_path(self, env_state: MVEEnvState) -> PathEff:
         """根据起点和终点求解五次多项式并写入graph"""
         agent_states = env_state.agent
         goal_states = env_state.goal
         @ft.partial(jax.jit)
-        def A_b_create_and_solve(agent_state, goal_state) -> Path:
+        def A_b_create_and_solve(agent_state, goal_state) -> PathEff:
             x0 = agent_state[0]
             x1 = goal_state[0]
             A = jnp.array([[1, x0, x0**2,   x0**3,    x0**4,    x0**5],
@@ -654,7 +654,7 @@ class MVEPathTracking(MVE):
         return coeffs
 
     @override
-    def get_graph(self, env_state: MVEEnvState, paths: Path, obst_as_agent:bool = False) -> MVEEnvGraphsTuple:
+    def get_graph(self, env_state: MVEEnvState, paths: PathEff, obst_as_agent:bool = False) -> MVEEnvGraphsTuple:
         num_agents = env_state.agent.shape[0]
         num_goals = env_state.goal.shape[0]
         num_obsts = env_state.obstacle.shape[0] # TODO: 为0时报错，但理论上可以为0
