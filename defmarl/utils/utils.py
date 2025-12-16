@@ -63,6 +63,9 @@ def tree_concat_at_front(tree1: _PyTree, tree2: _PyTree, axis: int) -> _PyTree:
 def tree_index(tree: _PyTree, idx: int | Array) -> _PyTree:
     return jtu.tree_map(lambda x: x[idx], tree)
 
+def tree_2nd_index(tree: _PyTree, idx: int | Array) -> _PyTree:
+    return jtu.tree_map(lambda x: x[:, idx], tree)
+
 
 def jax2np(pytree: _PyTree) -> _PyTree:
     return jtu.tree_map(np.array, pytree)
@@ -199,7 +202,7 @@ def tree_where(cond: BoolScalar | bool, true_val: _PyTree, false_val: _PyTree) -
 
 @jax.jit
 def calc_2d_rot_matrix(angle: float) -> Array:
-    "计算二维平面的旋转矩阵，angle输入为degree: xO = Q·xb"
+    "计算二维平面的旋转矩阵，angle输入为degree: xO = Q·xb，这里的x0和xb均为列向量"
     angle = angle * jnp.pi / 180
     return jnp.array([[jnp.cos(angle), -jnp.sin(angle)],
                       [jnp.sin(angle), jnp.cos(angle)]]) # Q
@@ -287,7 +290,7 @@ def sin_f(A:Array, w:Array, T:Array, B:Array) -> Callable:
         return A[:, None] * jnp.sin(w[:, None] * x + T[:, None]) + B[:, None]
     return f
 
-def tri_sec_f(f_l: Callable, f_m: Callable, f_h: Callable, x1: Array, x2: Array) -> Callable:
+def three_sec_f(f_l: Callable, f_m: Callable, f_h: Callable, x1: Array, x2: Array) -> Callable:
     """构造如下函数：
         { f_l(x), x <= x1
     y = { f_m(x), x1 < x <= x2
