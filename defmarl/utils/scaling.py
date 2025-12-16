@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from .typing import Array, Pos2d, State
 from .utils import calc_2d_rot_matrix
 
-@jax.jit
+#@jax.jit
 def compute_intersections(O: Pos2d, V: Pos2d, A, b, fill: Pos2d, eps=1e-8) -> Array:
     """计算输入两点的直线与Ax=b各边的交点"""
     # 解析输入直线系数（向量化扩展为(k,)形状，适配A的q条边）
@@ -37,7 +37,7 @@ def compute_intersections(O: Pos2d, V: Pos2d, A, b, fill: Pos2d, eps=1e-8) -> Ar
 
     return cand
 
-@jax.jit
+#@jax.jit
 def filter_ray_direction(k2_intersections: Array, O: Pos2d, V: Pos2d, fill: Pos2d) -> Array:
     """筛选与射线方向一致”的交点（射线：从O指向V）"""
     # 射线方向向量
@@ -50,20 +50,20 @@ def filter_ray_direction(k2_intersections: Array, O: Pos2d, V: Pos2d, fill: Pos2
     # 有效交点：同向，否则设为fill
     return jnp.where(k_same_dir[:, None], k2_intersections, fill)
 
-@jax.jit
+#@jax.jit
 def filter_in_bound(k2_intersections: Array, A, b, fill: Pos2d) -> Array:
     """筛选满足Ax<=b的点"""
     def _single_in_bound(intersection: Pos2d, A, b) -> bool:
-        return (jnp.dot(A, intersection)-b <= 1e-4).all()
+        return (jnp.dot(A, intersection)-b <= 1e-6).all()
     k_in_bound = jax.vmap(_single_in_bound, in_axes=(0, None, None))(k2_intersections, A, b)
 
     return jnp.where(k_in_bound[:, None], k2_intersections, fill)
 
 
-@jax.jit
+#@jax.jit
 def scaling_calc(s1: State, s2: State) -> Array:
     """计算agent和agent/obst的scaling factor"""
-    # state: x y vx vy θ dθdt bb_w bb_h a0 a1 a2 a3 a4 a5
+    # state: x y vx vy θ dθdt bb_w bb_h
     O1 = s1[:2]; O2 = s2[:2]
     # 计算 host 和 agent/obst 的顶点， host/agent/obst均为矩形
     Q1 = calc_2d_rot_matrix(s1[4])
@@ -71,13 +71,13 @@ def scaling_calc(s1: State, s2: State) -> Array:
                     [s1[6] / 2, -s1[7] / 2],
                     [-s1[6] / 2, s1[7] / 2],
                     [-s1[6] / 2, -s1[7] / 2]])
-    m_V = O1 + m_V @ Q1
+    m_V = O1 + m_V @ Q1.T
     Q2 = calc_2d_rot_matrix(s2[4])
     n_P = jnp.array([[s2[6] / 2, s2[7] / 2],
                     [s2[6] / 2, -s2[7] / 2],
                     [-s2[6] / 2, s2[7] / 2],
                     [-s2[6] / 2, -s2[7] / 2]])
-    n_P = O2 + n_P @ Q2
+    n_P = O2 + n_P @ Q2.T
 
     # 计算S1和S2的A1 b1 A2 b2
     Ao = jnp.array([[ 1., 0.],  # x<=b/2
@@ -106,7 +106,7 @@ def scaling_calc(s1: State, s2: State) -> Array:
     scaling = jnp.array([mk_scaling.min(), nl_scaling.min()]).min()
 
     # 判断S1缩放中心是否在S2中
-    O_in_S2 = jnp.where((A2@O1-b2 <= 1e-4).all(), -1., 1.)
+    O_in_S2 = jnp.where((A2@O1-b2 <= 1e-6).all(), -1., 1.)
 
     alpha = O_in_S2 * scaling
     return alpha
@@ -121,7 +121,7 @@ def scaling_calc_bound(s: State, A: Array, b: Array) -> Array:
                      [ s[6]/2, -s[7]/2],
                      [-s[6]/2,  s[7]/2],
                      [-s[6]/2, -s[7]/2]])
-    m_V = O + m_V @ Q
+    m_V = O + m_V @ Q.T
 
     # host向自身顶点发射射线
     mk2_intersections = jax.vmap(compute_intersections, in_axes=(None, 0, None, None, None))(
@@ -131,7 +131,7 @@ def scaling_calc_bound(s: State, A: Array, b: Array) -> Array:
     scaling = (mk_dist / mk_dist0).min()
 
     # 判断S1缩放中心是否在bound中
-    O_in_bound = jnp.where((A @ O - b <= 0).all(), -1., 1.)
+    O_in_bound = jnp.where((A @ O - b <= 1e-6).all(), -1., 1.)
 
     alpha = O_in_bound * scaling
     return alpha
