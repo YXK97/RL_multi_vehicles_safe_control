@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from .typing import Array, Pos2d, State
 from .utils import calc_2d_rot_matrix
 
-#@jax.jit
+@jax.jit
 def compute_intersections(O: Pos2d, V: Pos2d, A, b, fill: Pos2d, eps=1e-8) -> Array:
     """计算输入两点的直线与Ax=b各边的交点"""
     # 解析输入直线系数（向量化扩展为(k,)形状，适配A的q条边）
@@ -37,7 +37,7 @@ def compute_intersections(O: Pos2d, V: Pos2d, A, b, fill: Pos2d, eps=1e-8) -> Ar
 
     return cand
 
-#@jax.jit
+@jax.jit
 def filter_ray_direction(k2_intersections: Array, O: Pos2d, V: Pos2d, fill: Pos2d) -> Array:
     """筛选与射线方向一致”的交点（射线：从O指向V）"""
     # 射线方向向量
@@ -50,7 +50,7 @@ def filter_ray_direction(k2_intersections: Array, O: Pos2d, V: Pos2d, fill: Pos2
     # 有效交点：同向，否则设为fill
     return jnp.where(k_same_dir[:, None], k2_intersections, fill)
 
-#@jax.jit
+@jax.jit
 def filter_in_bound(k2_intersections: Array, A, b, fill: Pos2d) -> Array:
     """筛选满足Ax<=b的点"""
     def _single_in_bound(intersection: Pos2d, A, b) -> bool:
@@ -60,7 +60,7 @@ def filter_in_bound(k2_intersections: Array, A, b, fill: Pos2d) -> Array:
     return jnp.where(k_in_bound[:, None], k2_intersections, fill)
 
 
-#@jax.jit
+@jax.jit
 def scaling_calc(s1: State, s2: State) -> Array:
     """计算agent和agent/obst的scaling factor"""
     # state: x y vx vy θ dθdt bb_w bb_h
