@@ -157,7 +157,7 @@ class PPOPolicy(MultiAgentPolicy):
             GraphTransformerGNN,
             msg_dim=32,
             out_dim=gnn_out_dim,
-            n_heads=3,
+            n_heads=6,
             n_layers=gnn_layers
         )
         self.head = ft.partial(
