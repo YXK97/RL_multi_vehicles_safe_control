@@ -56,14 +56,6 @@ def train(args):
     remaining_iters = args.iters - from_iter
     model_path = None
     if args.path is not None:
-        with open(os.path.join(args.path, "config.yaml"), "r") as f:
-            config = yaml.load(f, Loader=yaml.UnsafeLoader)
-            wandb.init(
-                project="RL_experiments",
-                config={**config, **vars(args)},  # 合并之前的配置和当前的参数
-                resume="must"  # 恢复之前的实验
-            )
-
         # 加载iter
         path = args.path
         model_path = os.path.join(path, "models")
@@ -145,6 +137,30 @@ def train(args):
     if args.name is not None:
         run_name = run_name + "_" + args.name
 
+    # wandb init
+    if args.path is not None:
+        with open(os.path.join(args.path, "config.yaml"), "r") as f:
+            config = yaml.load(f, Loader=yaml.UnsafeLoader) # 这里面应当含有wandb的run_id
+            run_id = config.wandb_run_id
+            config = {**vars(config), **vars(args)}
+            wandb.init(
+                project=args.project_name,
+                name=run_name,
+                dir=os.path.join(args.path, "wandb", "latest-run"),
+                id=run_id,
+                resume_from=from_iter,
+                allow_val_change=True,
+                config=config,
+            )
+    else:
+        config = {**vars(args), **(algo.config)}
+        wandb.init(
+            project=args.project_name,
+            name=run_name,
+            config=config
+        )
+    run_id=wandb.run.id
+
 
     # get training parameters
     train_params = {
@@ -170,14 +186,12 @@ def train(args):
         save_log=not args.debug,
         num_gpu=n_gpu
     )
-    # save config
-    wandb.config.update(args)
-    wandb.config.update(algo.config)
 
     if not args.debug:
         with open(f"{log_dir}/config.yaml", "w") as f:
             yaml.dump(args, f)
             yaml.dump(algo.config, f)
+            yaml.dump({"wandb_run_id": run_id}, f)
     trainer.train()
 
 def main():
@@ -221,7 +235,7 @@ def main():
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--use-lstm", action="store_true", default=False)
     parser.add_argument("--rnn-step", type=int, default=16)
-    parser.add_argument("--from-iter", type=int, default=None)
+    parser.add_argument("--from-iter", type=int, default=0)
     parser.add_argument("--visible-devices", type=str, default=None)
     parser.add_argument("--use-proxy", action="store_true", default=False)
     parser.add_argument("--disable-wandb", action="store_true", default=False)
@@ -248,6 +262,8 @@ def main():
     parser.add_argument("--coef-ent-decay-ratio", type=float, default=None)
     parser.add_argument("--coef-ent-warmup-iters", type=int, default=None)
     parser.add_argument("--coef-ent-trans-iters", type=int, default=None)
+
+    parser.add_argument("--project-name", type=str, default="RL_vehicle_training")
 
     args = parser.parse_args()
     train(args)
