@@ -2,12 +2,14 @@ import functools as ft
 import jax
 import jax.numpy as jnp
 import einops as ei
+import optax
 
-from typing import Tuple
+from typing import Tuple, Optional
 from jaxtyping import Float
 
 from ..utils.typing import Array, Done, Reward, TFloat, BFloat, FloatScalar
 from ..utils.utils import assert_shape
+from ..utils.schedule import as_schedule, Schedule, LinDecay
 
 
 def compute_gae_single(
@@ -118,3 +120,15 @@ def compute_dec_efocp_gae(
 def compute_dec_efocp_V(z: FloatScalar, Vhs: Float[Array, "a nh"], Vl: FloatScalar) -> FloatScalar:
     assert z.shape == Vl.shape, f"z shape {z.shape} should be same as Vl shape {Vl.shape}"
     return jnp.maximum(Vhs.max(-1), (Vl - z))
+
+
+def val_to_optax_schedule(val: float, val_decay: bool, val_init: Optional[float], val_decay_ratio: Optional[float],
+                          val_warmup_iters: Optional[int], val_trans_iters: Optional[int]) -> optax.Schedule:
+    """根据参数设置配置schedule并make，可用于Constant或LinDecay"""
+    if val_decay:
+        assert (val_init is not None) and \
+               (val_decay_ratio is not None) and \
+               (val_warmup_iters is not None) and \
+               (val_trans_iters is not None), "decay需要配置参数！"
+        val: Schedule = LinDecay(val_init, val_decay_ratio, val_warmup_iters, val_trans_iters)
+    return as_schedule(val).make()
