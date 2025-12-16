@@ -41,7 +41,7 @@ def make_env(
     if num_obs is not None:
         params['n_obsts'] = num_obs
     if full_observation:
-        area_size = params['default_state_range'] if area_size is None else area_size
+        area_size = params['default_state_range'][:4] if area_size is None else area_size
         params['comm_radius'] = max(area_size) * 10
     if max_step is None:
         return ENV[env_id](
