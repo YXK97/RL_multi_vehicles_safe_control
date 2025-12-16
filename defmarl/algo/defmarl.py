@@ -13,11 +13,10 @@ from flax.training.train_state import TrainState
 from jax import lax
 
 from .module.root_finder import RootFinder
-from .utils import compute_dec_efocp_gae, compute_dec_efocp_V
+from .utils import compute_dec_efocp_gae, compute_dec_efocp_V, val_to_optax_schedule
 from .base import Algorithm
 from ..utils.typing import Action, Params, PRNGKey, Array, FloatScalar
 from ..utils.graph import GraphsTuple
-from ..utils.schedule import as_schedule, Schedule, Constant, LinDecay
 from ..utils.utils import jax_vmap, tree_index, tree_where
 from ..trainer.data import Rollout
 from ..trainer.utils import rollout as rollout_fn
@@ -26,20 +25,6 @@ from ..env.base import MultiAgentEnv
 from ..algo.module.value import ValueNet
 from ..algo.module.policy import PPOPolicy
 from ..nn.utils import get_default_tx
-
-
-def val_to_optax_schedule(val: float, val_decay: bool, val_init: Optional[float], val_decay_ratio: Optional[float],
-                          val_warmup_iters: Optional[int], val_trans_iters: Optional[int]) -> optax.Schedule:
-    """根据参数设置配置schedule并make，可用于Constant或LinDecay"""
-
-    if val_decay:
-        assert (val_init is not None) and \
-               (val_decay_ratio is not None) and \
-               (val_warmup_iters is not None) and \
-               (val_trans_iters is not None), "decay需要配置参数！"
-        val: Schedule = LinDecay(val_init, val_decay_ratio, val_warmup_iters, val_trans_iters)
-
-    return as_schedule(val).make()
 
 
 class DefMARL(Algorithm):
@@ -688,10 +673,10 @@ class DefMARL(Algorithm):
                 ft.partial(self.scan_value, critic_params=critic_params, Vh_params=Vh_params)))(
                 bcT_rollout, Vl_rnn_state_inits, Vh_rnn_state_inits
             )
-            loss_Vl_device_can = optax.l2_loss(bcT_Vl, bcT_Ql)
-            loss_Vh_device_can = optax.l2_loss(bcTah_Vh, bcTah_Qh)
-            loss_Vl_device = jnp.where(loss_Vl_device_can < 1e9, loss_Vl_device_can, 0)
-            loss_Vh_device = jnp.where(loss_Vh_device_can < 1e9, loss_Vh_device_can, 0) # 降低safety计算过程中，由于各种计算方法误差导致的噪声
+            loss_Vl_device = optax.l2_loss(bcT_Vl, bcT_Ql)
+            loss_Vh_device = optax.l2_loss(bcTah_Vh, bcTah_Qh)
+            # loss_Vl_device = jnp.where(loss_Vl_device < 1e9, loss_Vl_device, 0)
+            # loss_Vh_device = jnp.where(loss_Vh_device < 1e9, loss_Vh_device, 0) # 降低safety计算过程中，由于各种计算方法误差导致的噪声
             loss_Vl = jax.lax.pmean(loss_Vl_device.mean(), axis_name='n_gpu')
             loss_Vh = jax.lax.pmean(loss_Vh_device.mean(), axis_name='n_gpu')
             gt_unsafe = jax.lax.pmean((bcTah_Qh > 1e-6).mean(), axis_name='n_gpu')
