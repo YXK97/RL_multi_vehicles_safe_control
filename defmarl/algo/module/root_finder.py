@@ -19,7 +19,7 @@ class RootFinder:
         z_min: float,
         z_max: float,
         n_agent: int,
-        h_tgt: float = -0.2,
+        h_tgt: float = -1.,
         h_eps: float = 1e-2,
         n_iters: int = 20,
         z_comm: bool = False
