@@ -146,10 +146,11 @@ class Trainer:
             reward_mean = jax.lax.pmean(bT_total_reward.mean(), axis_name='n_gpu')
             reward_final = jax.lax.pmean(ba_last_reward.mean(), axis_name='n_gpu')
             bTah_cost = eval_rollouts.costs
-            cost = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            cost_max = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            cost_mean = jax.lax.pmean(bTah_cost.mean(), axis_name='n_gpu')
             unsafe_frac = jax.lax.pmean((bTah_cost.max(axis=-1).max(axis=-2) >= 1e-6).mean(), axis_name='n_gpu')
-            opt_z0 = jax.lax.pmean(eval_rollouts.zs[0, 0, 0, 0], axis_name='n_gpu')  # TODO：zs的维度是多少？
-            return reward_min, reward_max, reward_mean, reward_final, cost, unsafe_frac, opt_z0
+            opt_z0 = jax.lax.pmean(eval_rollouts.zs[0,0,0,0], axis_name='n_gpu')  # TODO：zs的维度是多少？
+            return reward_min, reward_max, reward_mean, reward_final, cost_max, cost_mean, unsafe_frac, opt_z0
 
         @ft.partial(jax.pmap, in_axes=(None, 0), axis_name='n_gpu')
         def zmax_rollout_and_eval(params: dict, eval_keys: PRNGKey):
@@ -159,9 +160,10 @@ class Trainer:
             reward_mean = jax.lax.pmean(bT_total_reward.mean(), axis_name='n_gpu')
             reward_final = jax.lax.pmean(ba_last_reward.mean(), axis_name='n_gpu')
             bTah_cost = eval_rollouts.costs
-            cost = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            cost_max = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            cost_mean = jax.lax.pmean(bTah_cost.mean(), axis_name='n_gpu')
             unsafe_frac = jax.lax.pmean((bTah_cost.max(axis=-1).max(axis=-2) >= 1e-6).mean(), axis_name='n_gpu')
-            return reward_mean, reward_final, cost, unsafe_frac
+            return reward_mean, reward_final, cost_max, cost_mean, unsafe_frac
 
         @ft.partial(jax.pmap, in_axes=(None, 0), axis_name='n_gpu')
         def zmin_rollout_and_eval(params: dict, eval_keys: PRNGKey):
@@ -171,11 +173,12 @@ class Trainer:
             reward_mean = jax.lax.pmean(bT_total_reward.mean(), axis_name='n_gpu')
             reward_final = jax.lax.pmean(ba_last_reward.mean(), axis_name='n_gpu')
             bTah_cost = eval_rollouts.costs
-            cost = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            cost_max = jax.lax.pmax(bTah_cost.max(), axis_name='n_gpu')
+            cost_mean = jax.lax.pmean(bTah_cost.mean(), axis_name='n_gpu')
             unsafe_frac = jax.lax.pmean((bTah_cost.max(axis=-1).max(axis=-2) >= 1e-6).mean(), axis_name='n_gpu')
-            return  reward_mean, reward_final, cost, unsafe_frac
+            return  reward_mean, reward_final, cost_max, cost_mean, unsafe_frac
 
-        for iter, iter_key in enumerate(all_iters_keys,start=self.start_iter):
+        for iter, iter_key in enumerate(all_iters_keys[self.start_iter:], start=self.start_iter):
             # 在eval/collect/update前断开参数追踪
             current_params = jax.lax.stop_gradient(self.algo.params)
             # evaluate the algorithm
@@ -184,34 +187,38 @@ class Trainer:
                 eval_info = {}
                 if iter % self.full_eval_interval == 0:
                     # full test with optimal z
-                    reward_min, reward_max, reward_mean, reward_final, cost, unsafe_frac, opt_z0 = \
+                    reward_min, reward_max, reward_mean, reward_final, cost_max, cost_mean, unsafe_frac, opt_z0 = \
                         opt_rollout_and_eval(current_params, G_eval_opt_keys)
                     eval_info = eval_info | {
                         "eval/reward": float(reward_mean[0]),
                         "eval/reward_final": float(reward_final[0]),
-                        "eval/cost": float(cost[0]),
+                        "eval/cost_max": float(cost_max[0]),
+                        "eval/cost_mean": float(cost_mean[0]),
                         "eval/unsafe_frac": float(unsafe_frac[0]),
                         "eval/opt_z0": float(opt_z0[0]),
                     }
                     time_since_start = time() - start_time
                     eval_verbose = (f'iter: {iter:3}, time: {time_since_start:5.0f}s, reward: {float(reward_mean[0]):9.4f}, '
-                                    f'min/max reward: {float(reward_min[0]):7.2f}/{float(reward_max[0]):7.2f}, cost: {float(cost[0]):8.4f}, '
+                                    f'min/max reward: {float(reward_min[0]):7.2f}/{float(reward_max[0]):7.2f}, '
+                                    f'cost_max: {float(cost_max[0]):8.4f}, cost_mean: {float(cost_mean[0]):8.4f}, '
                                     f'unsafe_frac: {float(unsafe_frac[0]):6.2f}')
 
                     tqdm.write(eval_verbose)
 
                 # partial test with zmin and zmax
-                reward_mean_zmax, reward_final_zmax, cost_zmax, unsafe_frac_zmax = \
+                reward_mean_zmax, reward_final_zmax, cost_zmax_max, cost_zmax_mean, unsafe_frac_zmax = \
                     zmax_rollout_and_eval(current_params, G_eval_zmax_keys)
-                reward_mean_zmin, reward_final_zmin, cost_zmin, unsafe_frac_zmin = \
+                reward_mean_zmin, reward_final_zmin, cost_zmin_max, cost_zmin_mean, unsafe_frac_zmin = \
                     zmin_rollout_and_eval(current_params, G_eval_zmin_keys)
                 eval_info = eval_info | {
                     "eval/reward_zmax": float(reward_mean_zmax[0]),
                     "eval/reward_zmin": float(reward_mean_zmin[0]),
                     "eval/reward_final_zmax": float(reward_final_zmax[0]),
                     "eval/reward_final_zmin": float(reward_final_zmin[0]),
-                    "eval/cost_zmax": float(cost_zmax[0]),
-                    "eval/cost_zmin": float(cost_zmin[0]),
+                    "eval/cost_zmax_max": float(cost_zmax_max[0]),
+                    "eval/cost_zmax_mean": float(cost_zmax_mean[0]),
+                    "eval/cost_zmin_max": float(cost_zmin_max[0]),
+                    "eval/cost_zmin_mean": float(cost_zmin_mean[0]),
                     "eval/unsafe_frac_zmax": float(unsafe_frac_zmax[0]),
                     "eval/unsafe_frac_zmin": float(unsafe_frac_zmin[0]),
                 }
