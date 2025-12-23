@@ -56,12 +56,12 @@ def test(args):
 
     path = args.path
     model_path = os.path.join(path, "models")
-    if args.from_step is None:
+    if args.from_iter is None:
         models = os.listdir(model_path)
-        from_step = max([int(model) for model in models if model.isdigit()])
+        from_iter = max([int(model) for model in models if model.isdigit()])
     else:
-        from_step = args.from_step
-    print("from_step: ", from_step)
+        from_iter = args.from_iter
+    print("from_iter: ", from_iter)
 
     algo = make_algo(
         algo=config.algo,
@@ -83,7 +83,7 @@ def test(args):
         rnn_layers=config.rnn_layers,
         use_lstm=config.use_lstm,
     )
-    algo.load(model_path, from_step)
+    algo.load(model_path, from_iter)
     if args.stochastic:
         def act_fn(x, z, rnn_state, key):
             action, _, new_rnn_state = algo.step(x, z, rnn_state, key)
@@ -165,7 +165,7 @@ def test(args):
     if args.no_video:
         return
 
-    videos_dir = pathlib.Path(path) / "videos" / f"{from_step}"
+    videos_dir = pathlib.Path(path) / "videos" / f"{from_iter}"
     videos_dir.mkdir(exist_ok=True, parents=True)
     for ii, (rollout, Ta_is_unsafe) in enumerate(zip(rollouts, is_unsafes)):
         safe_rate = rates[ii] * 100
@@ -184,7 +184,7 @@ def main():
     # optional arguments
     parser.add_argument("--epi", type=int, default=5)
     parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--from-step", type=int, default=None)
+    parser.add_argument("--from-iter", type=int, default=None)
     parser.add_argument("-n", "--num-agents", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--env", type=str, default=None)
