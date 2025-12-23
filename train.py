@@ -125,7 +125,7 @@ def train(args):
     start_time = datetime.datetime.now()
     start_time = start_time.strftime("%m%d%H%M%S")
     if args.path is not None and from_iter > 0:
-        log_dir=os.path.join(args.path, "logs")
+        log_dir=os.path.join(args.path)
     else:
         if not os.path.exists(f"{args.log_dir}/{args.env}/{args.algo}"):
             os.makedirs(f"{args.log_dir}/{args.env}/{args.algo}", exist_ok=True)
@@ -256,7 +256,7 @@ def main():
     parser.add_argument("--lr-critic-warmup-iters", type=int, default=None)
     parser.add_argument("--lr-critic-trans-iters", type=int, default=None)
 
-    parser.add_argument("--coef-ent", type=float, default=1e-3)
+    parser.add_argument("--coef-ent", type=float, default=1e-2)
     parser.add_argument("--coef-ent-decay", action="store_true", default=False)
     parser.add_argument("--coef-ent-init", type=float, default=None)
     parser.add_argument("--coef-ent-decay-ratio", type=float, default=None)
