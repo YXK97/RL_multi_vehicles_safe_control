@@ -46,9 +46,9 @@ def rollout(
     z0 = jax.random.uniform(key_z0, (1, 1), minval=-env.reward_max, maxval=-env.reward_min)
 
     z_key, key = jax.random.split(key, 2)
-    #rng = jax.random.uniform(z_key, (1, 1))
-    #z0 = jnp.where(rng > 0.7, -env.reward_max, z0)  # use z min
-    #z0 = jnp.where(rng < 0.2, -env.reward_min, z0)  # use z max
+    rng = jax.random.uniform(z_key, (1, 1))
+    # z0 = jnp.where(rng > 0.7, -env.reward_max, z0)  # use z min
+    z0 = jnp.where(rng < 0.2, -env.reward_min, z0)  # use z max
 
     z0 = jnp.repeat(z0, env.num_agents, axis=0)
 
