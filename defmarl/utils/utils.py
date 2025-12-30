@@ -352,5 +352,4 @@ def gen_i_j_pairs_no_identical(m: float, n: float) -> Tuple[jnp.ndarray, jnp.nda
 @jax.jit
 def normalize_angle(angles: jnp.ndarray) -> jnp.ndarray:
     """归一化角度到 [-180, 180]°，输入角度单位为°"""
-    angles_mod = jnp.mod(angles, 360)
-    return jnp.where(angles_mod > 180, angles_mod - 360, angles_mod)
+    return (angles + 180) % 360 - 180
