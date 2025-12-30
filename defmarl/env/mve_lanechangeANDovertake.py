@@ -13,7 +13,7 @@ from matplotlib.axes import Axes
 from matplotlib.collections import LineCollection
 
 from .mve import MVE, MVEEnvState, MVEEnvGraphsTuple
-from .designed_scene_gen import gen_scene_randomly
+from .designed_scene_gen import gen_scene_randomly, gen_handmade_scene_randomly
 from .utils import process_lane_centers, process_lane_marks, relative_state
 from ..trainer.data import Rollout
 from ..utils.graph import EdgeBlock, GetGraph, GraphsTuple
@@ -30,22 +30,22 @@ class MVELaneChangeAndOverTake(MVE):
     环境为四车道，障碍车均沿车道作匀速直线运动"""
 
     PARAMS = {
-        # 别克1949参数
-        "ego_lf": 1.488, # m
-        "ego_lr": 1.712, # m
-        "ego_bb_size": jnp.array([4.2, 1.7]), # bounding box的[width, height] m
-        "ego_m": 2045., # kg
-        "ego_Iz": 5428., # kg*m^2
-        "ego_Cf": 77850., # N/rad
-        "ego_Cr": 76510., # N/rad
+        # 宝骏E300参数，只有bb和m是准的，其它的都是估计的
+        "ego_lf": 0.8475, # m，假设质心位于几何中心
+        "ego_lr": 0.9025, # m，假设质心位于几何中心
+        "ego_bb_size": jnp.array([2.625, 1.647]), # bounding box的[width, height] m
+        "ego_m": 940., # kg
+        "ego_Iz": 752.25333, # kg*m^2，假设质心位于几何中心
+        "ego_Cf": 47850., # N/rad
+        "ego_Cr": 46510., # N/rad
         "comm_radius": 100,
-        "obst_bb_size": jnp.array([3.8, 2.3]), # bounding box的[width, height] m
+        "obst_bb_size": jnp.array([4., 2.]), # bounding box的[width, height] m
 
         # [x_l, x_h, y_l, y_h, vx_l, vx_h, vy_l, vy_h, θ_l, θ_h, dθdt_l, dθdt_h, \
         # bbw_l, bbw_h, bbh_l, bbh_h]
         # 单位：x,y,bbw,bbh: m  vx,vy: km/h,  θ: °, dθdt: °/s
         # 速度约束通过车身坐标系对纵向速度约束来进行
-        "default_state_range": jnp.array([-100., 100., -4.5, 4.5, -INF, INF, -INF, INF, -180., 180., -INF, INF,
+        "default_state_range": jnp.array([-50., 50., -2.5, 2.5, -INF, INF, -INF, INF, -180., 180., -INF, INF,
         -INF, INF, -INF, INF]), # 默认范围，用于指示正常工作的状态范围
         "rollout_state_range": jnp.array([-120., 220., -10., 10., -INF, INF, -INF, INF, -180., 180., -INF, INF,
         -INF, INF, -INF, INF]), # rollout过程中的限制，强制约束
@@ -62,12 +62,12 @@ class MVELaneChangeAndOverTake(MVE):
         0., 0., 0., 0.]),
         # 随机生成obst时的状态范围，其中y坐标为离散约束，obst的y坐标只能位于-3、0或3，obst沿x轴正向以vx作匀速直线运动
 
-        "lane_width": 3, # 车道宽度，m
+        "lane_width": 2.5, # 车道宽度，m
         #"dist2path_bias": 0.1, # 用于判断agent是否沿轨迹行驶 m
         #"theta2path_bias": 0.995, # 用于判断agent航向角是否满足轨迹的要求，即agent方向向量和轨迹方向向量夹角的cos是否大于0.995（是否小于5度）
         #"delta2mid_bias": 3, # 用于判断前轮转角是否是中性，±3°以内就不惩罚
-        "v_bias": 10, # 可允许的速度偏移量
-        "alpha_thresh": 1.3, # alpha大于thresh时才判定为安全，用于避障时让agent离obst不要那么近
+        "v_bias": 2, # 可允许的速度偏移量
+        "alpha_thresh": 1.2, # alpha大于thresh时才判定为安全，用于避障时让agent离obst不要那么近
 
         # "n_obsts": 2,
     }
@@ -84,9 +84,9 @@ class MVELaneChangeAndOverTake(MVE):
     def __init__(self,
                  num_agents: int,
                  area_size: Optional[float] = None,
-                 max_step: int = 256,
+                 max_step: int = 512,
                  max_travel: Optional[float] = None,
-                 dt: float = 0.05,
+                 dt: float = 0.025,
                  params: dict = None
                  ):
         area_size = MVELaneChangeAndOverTake.PARAMS["rollout_state_range"][:4] if area_size is None else area_size
@@ -148,9 +148,12 @@ class MVELaneChangeAndOverTake(MVE):
         xrange = self.params["default_state_range"][:2]
         yrange = self.params["default_state_range"][2:4]
         lanewidth = self.params["lane_width"]
-        agents, goals, obsts, all_goals = gen_scene_randomly(key, self.num_agents, self.num_goals, xrange, yrange,
+        agents, obsts, all_goals = gen_scene_randomly(key, self.num_agents, self.num_goals, xrange, yrange,
                                                              lanewidth, c_ycs)
         self.all_goals = all_goals
+        goals_init_indices = find_closest_goal_indices(agents, all_goals)
+        agents_indices = jnp.arange(agents.shape[0])
+        goals = all_goals[agents_indices, goals_init_indices, :]
         env_state = MVEEnvState(agents, goals, obsts)
         self.num_obsts = obsts.shape[0]
 
@@ -295,6 +298,7 @@ class MVELaneChangeAndOverTake(MVE):
                         new_obstacle_states = next_obst_states)
         """
 
+
         return self.get_graph(next_env_state), reward, cost, goal, done, info
 
     def get_reward(self, graph: MVEEnvGraphsTuple, ad_action: Action) -> Reward:
@@ -333,9 +337,9 @@ class MVELaneChangeAndOverTake(MVE):
 
         # 速度跟踪惩罚
         a_delta_v = a2_goal_v_b_kmph[:, 0] - a2_agent_v_b_kmph[:, 0]
-        reward -= (a_delta_v**2).mean() * 0.00005 # 只比较x方向（纵向）速度
-        # reward -= jnp.abs(a_delta_v).mean() * 0.00005
-        # reward -= jnp.where(jnp.abs(a_delta_v) > self.params["v_bias"], 1., 0.) * 0.0001
+        # reward -= (a_delta_v**2).mean() * 0.00005 # 只比较x方向（纵向）速度
+        reward -= jnp.abs(a_delta_v).mean() * 0.0005
+        reward -= jnp.where(jnp.abs(a_delta_v) > self.params["v_bias"], 1., 0.).mean() * 0.005
 
         # 动作惩罚
         reward -= (ad_action[:, 0]**2).mean() * 0.00005
@@ -549,6 +553,7 @@ class MVELaneChangeAndOverTake(MVE):
             transform=ax.transData,
             clip_on=True,
             zorder=8,
+            alpha=0.
         )
         agent_labels = [ax.text(float(agents_pos[ii, 0]), float(agents_pos[ii, 1]), f"{ii}", **label_font_opts)
                         for ii in range(self.num_agents)]
