@@ -55,19 +55,19 @@ def rollout(
     def body(data, key_):
         graph, rnn_state, z = data
         action, log_pi, new_rnn_state = actor(graph, z, rnn_state, key_)
-        next_graph, reward, cost, goal, done, info = env.step(graph, action)
+        next_graph, reward, cost, done, info = env.step(graph, action)
 
         # z dynamics
         z_next = (z + reward) / gamma
         z_next = jnp.clip(z_next, -env.reward_max, -env.reward_min)
 
         return ((next_graph, new_rnn_state, z_next),
-                (graph, action, rnn_state, reward, cost, goal, done, log_pi, next_graph, z))
+                (graph, action, rnn_state, reward, cost, done, log_pi, next_graph, z))
 
     keys = jax.random.split(key, env.max_episode_steps)
-    _, (graphs, actions, rnn_states, rewards, costs, goals, dones, log_pis, next_graphs, zs) = (
+    _, (graphs, actions, rnn_states, rewards, costs, dones, log_pis, next_graphs, zs) = (
         jax.lax.scan(body, (init_graph, init_rnn_state, z0), keys, length=env.max_episode_steps))
-    rollout_data = Rollout(graphs, actions, rnn_states, rewards, costs, goals, dones, log_pis, next_graphs, zs)
+    rollout_data = Rollout(graphs, actions, rnn_states, rewards, costs, dones, log_pis, next_graphs, zs)
     return rollout_data
 
 
@@ -138,17 +138,17 @@ def eval_rollout(
             action, actor_rnn_state = actor(graph, z, actor_rnn_state)
         else:
             action, actor_rnn_state = actor(graph, z, actor_rnn_state, key_)
-        next_graph, reward, cost, goal, done, info = env.step(graph, action)
+        next_graph, reward, cost, done, info = env.step(graph, action)
         return ((next_graph, actor_rnn_state, Vh_rnn_state),
-                (graph, action, actor_rnn_state, reward, cost, goal, done, None, next_graph, z))
+                (graph, action, actor_rnn_state, reward, cost, done, None, next_graph, z))
 
     keys = jax.random.split(key, env.max_episode_steps)
-    _, (graphs, actions, actor_rnn_states, rewards, costs, goals, dones, log_pis, next_graphs, zs) = (
+    _, (graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs, zs) = (
         jax.lax.scan(body,
                      (init_graph, init_actor_rnn_state, init_Vh_rnn_state),
                      keys,
                      length=env.max_episode_steps))
-    rollout_data = Rollout(graphs, actions, actor_rnn_states, rewards, costs, goals, dones, log_pis, next_graphs, zs)
+    rollout_data = Rollout(graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs, zs)
     return rollout_data
 
 
