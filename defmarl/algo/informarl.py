@@ -21,8 +21,9 @@ from ..trainer.utils import rollout as rollout_fn
 from ..env.base import MultiAgentEnv
 from ..algo.module.value import ValueNet
 from ..algo.module.policy import PPOPolicy
-from .utils import compute_gae
+from .utils import compute_gae, val_to_optax_schedule
 from .base import Algorithm
+from ..nn.utils import get_default_tx
 
 
 class InforMARL(Algorithm):
@@ -39,13 +40,32 @@ class InforMARL(Algorithm):
             actor_gnn_layers: int = 2,
             critic_gnn_layers: int = 2,
             gamma: float = 0.99,
-            lr_actor: float = 1e-5,
-            lr_critic: float = 1e-5,
+
+            lr_actor: float = 3e-4,
+            lr_actor_decay: bool = False,
+            lr_actor_init: Optional[float] = None,
+            lr_actor_decay_ratio: Optional[float] = None,
+            lr_actor_warmup_iters: Optional[int] = None,
+            lr_actor_trans_iters: Optional[int] = None,
+
+            lr_critic: float = 1e-3,
+            lr_critic_decay: bool = False,
+            lr_critic_init: Optional[float] = None,
+            lr_critic_decay_ratio: Optional[float] = None,
+            lr_critic_warmup_iters: Optional[int] = None,
+            lr_critic_trans_iters: Optional[int] = None,
+
+            coef_ent: float = 1e-2,
+            coef_ent_decay: bool = False,
+            coef_ent_init: Optional[float] = None,
+            coef_ent_decay_ratio: Optional[float] = None,
+            coef_ent_warmup_iters: Optional[int] = None,
+            coef_ent_trans_iters: Optional[int] = None,
+
             batch_size: int = 8192,
             epoch_ppo: int = 1,
             clip_eps: float = 0.25,
             gae_lambda: float = 0.95,
-            coef_ent: float = 1e-2,
             max_grad_norm: float = 2.0,
             seed: int = 0,
             use_rnn: bool = True,
@@ -53,6 +73,7 @@ class InforMARL(Algorithm):
             rnn_step: int = 16,
             rollout_length: Optional[int] = None,
             use_lstm: bool = False,
+            iter_index: int = 0,
             **kwargs
     ):
         super(InforMARL, self).__init__(
@@ -68,13 +89,32 @@ class InforMARL(Algorithm):
         self.actor_gnn_layers = actor_gnn_layers
         self.critic_gnn_layers = critic_gnn_layers
         self.gamma = gamma
-        self.lr_actor = lr_actor
-        self.lr_critic = lr_critic
+
+        self.lr_actor_val = lr_actor
+        self.lr_actor_decay = lr_actor_decay
+        self.lr_actor_init = lr_actor_init
+        self.lr_actor_decay_ratio = lr_actor_decay_ratio
+        self.lr_actor_warmup_iters = lr_actor_warmup_iters
+        self.lr_actor_trans_iters = lr_actor_trans_iters
+
+        self.lr_critic_val = lr_critic
+        self.lr_critic_decay = lr_critic_decay
+        self.lr_critic_init = lr_critic_init
+        self.lr_critic_decay_ratio = lr_critic_decay_ratio
+        self.lr_critic_warmup_iters = lr_critic_warmup_iters
+        self.lr_critic_trans_iters = lr_critic_trans_iters
+
+        self.coef_ent_val = coef_ent
+        self.coef_ent_decay = coef_ent_decay
+        self.coef_ent_init = coef_ent_init
+        self.coef_ent_decay_ratio = coef_ent_decay_ratio
+        self.coef_ent_warmup_iters = coef_ent_warmup_iters
+        self.coef_ent_trans_iters = coef_ent_trans_iters
+
         self.batch_size = batch_size
         self.epoch_ppo = epoch_ppo
         self.clip_eps = clip_eps
         self.gae_lambda = gae_lambda
-        self.coef_ent = coef_ent
         self.max_grad_norm = max_grad_norm
         self.seed = seed
         self.rollout_length = rollout_length
@@ -82,6 +122,20 @@ class InforMARL(Algorithm):
         self.rnn_layers = rnn_layers
         self.rnn_step = rnn_step
         self.use_lstm = use_lstm
+        self.start_iter_index = iter_index
+        self.iter_index = iter_index
+
+        self.lr_actor_sched = val_to_optax_schedule(self.lr_actor_val, self.lr_actor_decay, self.lr_actor_init,
+                                                    self.lr_actor_decay_ratio, self.lr_actor_warmup_iters,
+                                                    self.lr_actor_trans_iters)
+        self.lr_critic_sched = val_to_optax_schedule(self.lr_critic_val, self.lr_critic_decay, self.lr_critic_init,
+                                                     self.lr_critic_decay_ratio, self.lr_critic_warmup_iters,
+                                                     self.lr_critic_trans_iters)
+        self.coef_ent_sched = val_to_optax_schedule(self.coef_ent_val, self.coef_ent_decay, self.coef_ent_init,
+                                                    self.coef_ent_decay_ratio, self.coef_ent_warmup_iters,
+                                                    self.coef_ent_trans_iters)
+        self.policy_tx = get_default_tx(self.lr_actor_sched)
+        self.critic_tx = get_default_tx(self.lr_critic_sched)
 
         # set nominal graph for initialization of the neural networks
         nominal_graph = GraphsTuple(
@@ -128,12 +182,10 @@ class InforMARL(Algorithm):
         policy_params = self.policy.dist.init(
             policy_key, nominal_graph, self.init_rnn_state, self.n_agents, self.nominal_z.repeat(self.n_agents, axis=0)
         )
-        policy_optim = optax.adam(learning_rate=lr_actor)
-        self.policy_optim = optax.apply_if_finite(policy_optim, 1_000_000)
         self.policy_train_state = TrainState.create(
             apply_fn=self.policy.sample_action,
             params=policy_params,
-            tx=self.policy_optim
+            tx=self.policy_tx
         )
 
         # set up PPO critic
@@ -164,12 +216,10 @@ class InforMARL(Algorithm):
         critic_key, key = jr.split(key)
         critic_params = self.critic.net.init(
             critic_key, nominal_graph, self.init_value_rnn_state, self.n_agents, self.nominal_z)
-        critic_optim = optax.adam(learning_rate=lr_critic)
-        self.critic_optim = optax.apply_if_finite(critic_optim, 1_000_000)
         self.critic_train_state = TrainState.create(
             apply_fn=self.critic.get_value,
             params=critic_params,
-            tx=self.critic_optim
+            tx=self.critic_tx
         )
 
         # set up key
@@ -187,6 +237,19 @@ class InforMARL(Algorithm):
 
         self.rollout_fn = jax.jit(rollout_fn_)
 
+
+    @property
+    def lr_actor(self):
+        return self.lr_actor_sched(self.iter_index)
+
+    @property
+    def lr_critic(self):
+        return self.lr_critic_sched(self.iter_index)
+
+    @property
+    def coef_ent(self):
+        return self.coef_ent_sched(self.iter_index)
+
     @property
     def config(self) -> dict:
         return {
@@ -195,24 +258,47 @@ class InforMARL(Algorithm):
             'critic_gnn_layers': self.critic_gnn_layers,
             'gamma': self.gamma,
             'rollout_length': self.rollout_length,
-            'lr_actor': self.lr_actor,
-            'lr_critic': self.lr_critic,
+
+            'lr_actor_val': self.lr_actor_val,
+            'lr_actor_decay': self.lr_actor_decay,
+            'lr_actor_init': self.lr_actor_init,
+            'lr_actor_decay_ratio': self.lr_actor_decay_ratio,
+            'lr_actor_warmup_iters': self.lr_actor_warmup_iters,
+            'lr_actor_trans_iters': self.lr_actor_trans_iters,
+
+            'lr_critic_val': self.lr_critic_val,
+            'lr_critic_decay': self.lr_critic_decay,
+            'lr_critic_init': self.lr_critic_init,
+            'lr_critic_decay_ratio': self.lr_critic_decay_ratio,
+            'lr_critic_warmup_iters': self.lr_critic_warmup_iters,
+            'lr_critic_trans_iters': self.lr_critic_trans_iters,
+
+            'coef_ent_val': self.coef_ent_val,
+            'coef_ent_decay': self.coef_ent_decay,
+            'coef_ent_init': self.coef_ent_init,
+            'coef_ent_decay_ratio': self.coef_ent_decay_ratio,
+            'coef_ent_warmup_iters': self.coef_ent_warmup_iters,
+            'coef_ent_trans_iters': self.coef_ent_trans_iters,
+
             'batch_size': self.batch_size,
             'epoch_ppo': self.epoch_ppo,
             'clip_eps': self.clip_eps,
             'gae_lambda': self.gae_lambda,
-            'coef_ent': self.coef_ent,
             'max_grad_norm': self.max_grad_norm,
             'seed': self.seed,
             'use_rnn': self.use_rnn,
             'rnn_layers': self.rnn_layers,
             'rnn_step': self.rnn_step,
-            'use_lstm': self.use_lstm
+            'use_lstm': self.use_lstm,
+            'iter_index': self.iter_index,
         }
 
     @property
     def params(self) -> Params:
-        return self.policy_train_state.params
+        return {
+            "policy": self.policy_train_state.params,
+            "critic": self.critic_train_state.params
+        }
 
     def act(
             self,
@@ -223,7 +309,7 @@ class InforMARL(Algorithm):
     ) -> [Action, Array]:
         if params is None:
             params = self.params
-        action, rnn_state = self.policy.get_action(params, graph, rnn_state, z)
+        action, rnn_state = self.policy.get_action(params["policy"], graph, rnn_state, z)
         return action, rnn_state
 
     def step(
@@ -231,17 +317,41 @@ class InforMARL(Algorithm):
     ) -> Tuple[Action, Array, Array]:
         if params is None:
             params = self.params
-        action, log_pi, rnn_state = self.policy_train_state.apply_fn(params, graph, rnn_state, key, z)
+        action, log_pi, rnn_state = self.policy_train_state.apply_fn(params["policy"], graph, rnn_state, key, z)
         return action, log_pi, rnn_state
 
+    @ft.partial(jax.pmap, in_axes=(None, None, 0), axis_name='n_gpu', static_broadcasted_argnums=(0,))
     def collect(self, params: Params, b_key: PRNGKey) -> Rollout:
         rollout_result = self.rollout_fn(params, b_key)
         return rollout_result
 
-    def update(self, rollout: Rollout, step: int) -> dict:
-        key, self.key = jr.split(self.key)
 
-        update_info = {}
+    def update(self, rollouts: Rollout, iter_index: int) -> dict:
+        _, self.key = jr.split(self.key)
+        assert iter_index == self.iter_index
+        critic_train_state, policy_train_state, update_info = self.pmap_update(
+            self.critic_train_state,
+            self.policy_train_state,
+            rollouts,
+        )
+        critic_train_state_single = jtu.tree_map(lambda x: x[0], critic_train_state)
+        policy_train_state_single = jtu.tree_map(lambda x: x[0], policy_train_state)
+        update_info_single = jtu.tree_map(lambda x: x[0], update_info)
+        self.critic_train_state = critic_train_state_single
+        self.policy_train_state = policy_train_state_single
+
+        update_info_single = update_info_single | {'hyper/lr_actor': self.lr_actor,
+                                                   'hyper/lr_critic': self.lr_critic,
+                                                   'hyper/coef_ent': self.coef_ent}
+        self.iter_index += 1
+
+        return update_info_single
+
+    @ft.partial(jax.pmap, in_axes=(None, None, None, 0), axis_name='n_gpu', static_broadcasted_argnums=(0,))
+    def pmap_update(self,
+                    critic_train_state: TrainState,
+                    policy_train_state: TrainState,
+                    rollout: Rollout):
         assert rollout.dones.shape[0] * rollout.dones.shape[1] >= self.batch_size
         for i_epoch in range(self.epoch_ppo):
             idx = np.arange(rollout.dones.shape[0])
@@ -250,11 +360,9 @@ class InforMARL(Algorithm):
             rnn_chunk_ids = jnp.array(jnp.array_split(rnn_chunk_ids, rollout.dones.shape[1] // self.rnn_step))
             batch_idx = jnp.array(jnp.array_split(idx, idx.shape[0] // (self.batch_size // rollout.dones.shape[1])))
             critic_train_state, policy_train_state, update_info = self.update_inner(
-                self.critic_train_state, self.policy_train_state, rollout, batch_idx, rnn_chunk_ids
+                critic_train_state, policy_train_state, rollout, batch_idx, rnn_chunk_ids
             )
-            self.critic_train_state = critic_train_state
-            self.policy_train_state = policy_train_state
-        return update_info
+        return critic_train_state, policy_train_state, update_info
 
     def scan_value(
             self, graphs: GraphsTuple, init_rnn_state: Array, critic_params: Params
@@ -328,7 +436,7 @@ class InforMARL(Algorithm):
             rnn_states: Array,
             rnn_chunk_ids: Array
     ) -> Tuple[TrainState, dict]:
-        graph_chunks = jax.tree_map(lambda x: x[:, rnn_chunk_ids], rollout.graph)
+        graph_chunks = jax.tree.map(lambda x: x[:, rnn_chunk_ids], rollout.graph)
         rnn_state_inits = jnp.zeros_like(rnn_states[:, rnn_chunk_ids[:, 0]])  # use zeros rnn_state as init
 
         def get_value_loss(params):
@@ -376,14 +484,14 @@ class InforMARL(Algorithm):
         gaes = jnp.repeat(gaes, self.n_agents, axis=-1)
 
         # divide the rollout into chunks (n_env, n_chunks, T, ...)
-        graph_chunks = jax.tree_map(lambda x: x[:, rnn_chunk_ids], rollout.graph)
-        action_chunks = jax.tree_map(lambda x: x[:, rnn_chunk_ids], rollout.actions)
+        graph_chunks = jax.tree.map(lambda x: x[:, rnn_chunk_ids], rollout.graph)
+        action_chunks = jax.tree.map(lambda x: x[:, rnn_chunk_ids], rollout.actions)
         rnn_state_inits = jnp.zeros_like(rollout.rnn_states[:, rnn_chunk_ids[:, 0]])  # use zeros rnn_state as init
 
         action_key = jr.fold_in(self.key, policy_train_state.step)
         action_keys = jr.split(action_key, rollout.actions.shape[0] * rollout.actions.shape[1]).reshape(
             rollout.actions.shape[:2] + (2,))
-        action_keys = jax.tree_map(lambda x: x[:, rnn_chunk_ids], action_keys)
+        action_keys = jax.tree.map(lambda x: x[:, rnn_chunk_ids], action_keys)
 
         def get_policy_loss(params):
             log_pis, policy_entropy, rnn_states, final_rnn_states = jax.vmap(jax.vmap(
@@ -423,12 +531,18 @@ class InforMARL(Algorithm):
 
         return policy_train_state, info
 
-    def save(self, save_dir: str, step: int):
-        model_dir = os.path.join(save_dir, str(step))
+
+    def save(self, save_dir: str, iter: int, params_to_save: dict = None):
+        model_dir = os.path.join(save_dir, str(iter))
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
-        pickle.dump(self.policy_train_state.params, open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
-        pickle.dump(self.critic_train_state.params, open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
+        if params_to_save is not None:
+            pickle.dump(params_to_save['policy'], open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
+            pickle.dump(params_to_save['critic'], open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
+        else:
+            pickle.dump(self.policy_train_state.params, open(os.path.join(model_dir, 'actor.pkl'), 'wb'))
+            pickle.dump(self.critic_train_state.params, open(os.path.join(model_dir, 'critic.pkl'), 'wb'))
+
 
     def load(self, load_dir: str, step: int):
         path = os.path.join(load_dir, str(step))
