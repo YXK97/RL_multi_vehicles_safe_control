@@ -471,7 +471,7 @@ class DefMARL(Algorithm):
 
         return update_info_single
 
-    @ft.partial(jax.pmap, in_axes=(None, None, None, None, 0, None), axis_name='n_gpu', static_broadcasted_argnums=(0,))
+    @ft.partial(jax.pmap, in_axes=(None, None, None, None, 0), axis_name='n_gpu', static_broadcasted_argnums=(0,))
     def pmap_update(self,
                     critic_train_state: TrainState,
                     Vh_train_state: TrainState,
