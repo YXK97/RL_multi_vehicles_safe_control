@@ -45,31 +45,21 @@ class MVELaneChangeAndOverTake(MVE):
         # bbw_l, bbw_h, bbh_l, bbh_h]
         # 单位：x,y,bbw,bbh: m  vx,vy: km/h,  θ: °, dθdt: °/s
         # 速度约束通过车身坐标系对纵向速度约束来进行
-        "default_state_range": jnp.array([-50., 50., -2.5, 2.5, -INF, INF, -INF, INF, -180., 180., -INF, INF,
+        "default_state_range": jnp.array([-100., 100., -4.5, 4.5, -INF, INF, -INF, INF, -180., 180., -INF, INF,
         -INF, INF, -INF, INF]), # 默认范围，用于指示正常工作的状态范围
         "rollout_state_range": jnp.array([-120., 220., -10., 10., -INF, INF, -INF, INF, -180., 180., -INF, INF,
         -INF, INF, -INF, INF]), # rollout过程中的限制，强制约束
         "rollout_state_b_range": jnp.array([-INF, INF, -INF, INF, 20., 100., -INF, INF, -INF, INF, -INF, INF,
         -INF, INF, -INF, INF]), # rollout过程中在车身坐标系下状态约束，主要对纵向速度有约束，动力学模型不允许倒车
-        "agent_init_state_range": jnp.array([-100., -80., -3., 3., 30., 90., 0., 0., -40., 40., 0., 0.,
-        0., 0., 0., 0.]),
-        # 用于agent初始化的状态范围，其中y坐标为离散约束，agent初始化的y坐标只能位于-3、0或3
-        "terminal_state_range": jnp.array([80., 100., -3., 3., 50., 60., 0., 0., 0., 0., 0., 0.,
-        0., 0., 0., 0.]),
-        # 随机生成换道结束时的状态范围，其中y坐标为离散约束，terminal的y坐标只能位于-3、0或3，xy和theta用于初始化轨迹参数，\
-        # vx用于指示纵向目标跟踪速度，在后续生成goal时，bw和bh均置为0
-        "obst_state_range": jnp.array([-130., -120., -3., 3., 70., 80., 0., 0., -180., 180., 0., 0.,
-        0., 0., 0., 0.]),
-        # 随机生成obst时的状态范围，其中y坐标为离散约束，obst的y坐标只能位于-3、0或3，obst沿x轴正向以vx作匀速直线运动
+        "agent_init_state_range": jnp.array([-100., -50., -3., 3., -INF, INF, -INF, INF, -180., 180., -INF, INF,
+        -INF, INF, -INF, INF]), # 用于agent初始化的状态范围
+        "terminal_state_range": jnp.array([50., 100., -3., 3., -INF, INF, -INF, INF, -180., 180., -INF, INF,
+        -INF, INF, -INF, INF]), # 随机生成terminal时的状态范围
+        # "obst_state_range": jnp.array([-15., 20., -7., 7.5, 0., 360., 0., 0.]), # 随机生成obstacle的状态范围
 
-        "lane_width": 2.5, # 车道宽度，m
-        #"dist2path_bias": 0.1, # 用于判断agent是否沿轨迹行驶 m
-        #"theta2path_bias": 0.995, # 用于判断agent航向角是否满足轨迹的要求，即agent方向向量和轨迹方向向量夹角的cos是否大于0.995（是否小于5度）
-        #"delta2mid_bias": 3, # 用于判断前轮转角是否是中性，±3°以内就不惩罚
-        "v_bias": 2, # 可允许的速度偏移量
-        "alpha_thresh": 1.2, # alpha大于thresh时才判定为安全，用于避障时让agent离obst不要那么近
-
-        # "n_obsts": 2,
+        "lane_width": 3, # 车道宽度，m
+        "v_bias": 5, # 可允许的速度偏移量
+        "alpha_thresh": 1.3, # alpha大于thresh时才判定为安全，用于避障时让agent离obst不要那么近
     }
     PARAMS.update({
         "ego_radius": jnp.linalg.norm(PARAMS["ego_bb_size"]/2), # m
@@ -263,7 +253,7 @@ class MVELaneChangeAndOverTake(MVE):
         action = self.transform_action(action)
         next_agent_states = self.agent_step_euler(agent_states, action)
         next_goal_states = self.goal_step(next_agent_states)
-        goal = next_goal_states[:, :2]
+        # goal = next_goal_states[:, :2]
         next_env_state = MVEEnvState(next_agent_states, next_goal_states, next_obst_states)
         info = {}
 
@@ -299,7 +289,7 @@ class MVELaneChangeAndOverTake(MVE):
         """
 
 
-        return self.get_graph(next_env_state), reward, cost, goal, done, info
+        return self.get_graph(next_env_state), reward, cost, done, info
 
     def get_reward(self, graph: MVEEnvGraphsTuple, ad_action: Action) -> Reward:
         num_agents = graph.env_states.agent.shape[0]
@@ -424,7 +414,7 @@ class MVELaneChangeAndOverTake(MVE):
 
         # add margin and clip
         eps = 1.
-        cost = jnp.where(cost <= 0.0, cost - eps, cost + eps)
+        cost = jnp.where(cost <= 0.0, cost, cost + eps)
         cost = jnp.clip(cost, a_min=-3.0)
 
         return cost
@@ -439,7 +429,8 @@ class MVELaneChangeAndOverTake(MVE):
             n_goals: Optional[int] = None,
             **kwargs
     ) -> None:
-        ref_goals = rollout.goals
+        T_goal_states = jax.vmap(lambda x: x.type_states(type_idx=MVE.GOAL, n_type=self.num_agents))(rollout.graph)
+        ref_goals = T_goal_states[:, :, :2]
         n_goals = self.num_agents if n_goals is None else n_goals
 
         ax: Axes
@@ -775,3 +766,12 @@ class MVELaneChangeAndOverTake(MVE):
         lower_lim = jnp.array([-1., -7.])[None, :].repeat(self.num_agents, axis=0) # ax: m/s^2, δ: °
         upper_lim = jnp.array([2., 7.])[None, :].repeat(self.num_agents, axis=0)
         return lower_lim, upper_lim
+
+    def ros_run(self):
+        """在reset初始化之后才能使用，可能还需要一个ros_init函数进行ros节点的初始化？"""
+
+        # 从action节点订阅action信息
+
+        # step，包含agent、goal、obst的step，考虑添加一定的时延？
+
+        # 发布状态信息至env节点
