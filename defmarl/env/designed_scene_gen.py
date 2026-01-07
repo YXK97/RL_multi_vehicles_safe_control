@@ -1017,7 +1017,6 @@ class HandMadeScene(LaneChangeANDOvertakeScene):
 def gen_scene_randomly(key: PRNGKey, num_agents: int, num_ref_points: int, xrange: Array, yrange: Array,
                        lane_width: float, lane_centers: Array) -> Tuple[AgentState, ObstState, PathRefs]:
     choose_key, scene_key = jr.split(key, 2)
-    """
     scene_list = [LaneChangeMiddleStaticEdgeFastMoving(scene_key, num_agents, num_ref_points, xrange, yrange,
                                                        lane_width, lane_centers).make,
                  LaneChangeMiddleStaticEdgeSlowMoving(scene_key, num_agents, num_ref_points, xrange, yrange,
@@ -1030,8 +1029,7 @@ def gen_scene_randomly(key: PRNGKey, num_agents: int, num_ref_points: int, xrang
                                                     lane_width, lane_centers).make,
                  OvertakeEdgeStaticMiddleSlowMoving(scene_key, num_agents, num_ref_points, xrange, yrange,
                                                     lane_width, lane_centers).make]
-    """
-    scene_list = [OvertakeInLowSpeed(scene_key, num_agents, num_ref_points, xrange, yrange, lane_width, lane_centers).make]
+    # scene_list = [OvertakeInLowSpeed(scene_key, num_agents, num_ref_points, xrange, yrange, lane_width, lane_centers).make]
     choose_id = jr.choice(choose_key, len(scene_list))
     aS_agent_state, oS_obst_state, anS_goals = jax.lax.switch(choose_id, scene_list)
 
