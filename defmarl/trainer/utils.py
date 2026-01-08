@@ -124,7 +124,10 @@ def eval_rollout(
 ):
     key_x0, key = jax.random.split(key)
     init_graph = env.reset(key_x0)
-    z0 = jax.random.uniform(key, (env.num_agents, 1), minval=-env.reward_max, maxval=-env.reward_min)
+    if z_fn is not None:
+        z0 = jax.random.uniform(key, (env.num_agents, 1), minval=-env.reward_max, maxval=-env.reward_min)
+    else:
+        z0 = -env.reward_max # 对于informarl和informarl-lagr，直接在每次测试时使用固定的z即可
 
     def body(data, key_):
         graph, actor_rnn_state, Vh_rnn_state = data
