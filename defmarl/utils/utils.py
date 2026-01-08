@@ -353,3 +353,34 @@ def gen_i_j_pairs_no_identical(m: float, n: float) -> Tuple[jnp.ndarray, jnp.nda
 def normalize_angle(angles: jnp.ndarray) -> jnp.ndarray:
     """归一化角度到 [-180, 180]°，输入角度单位为°"""
     return (angles + 180) % 360 - 180
+
+
+@jax.jit
+def nthroot(x: jnp.ndarray, n: int) -> jnp.ndarray:
+    """
+    复刻MATLAB的nthroot函数：计算实数的n次方根（返回实数，而非复数）
+    参数：
+        x: 底数（实数/实数数组）
+        n: 根次数（正整数）
+    返回：
+        实数n次方根，兼容JAX向量化、JIT编译
+    异常：
+        1. n非正整数 → 报错
+        2. n为偶数且x<0 → 报错
+    """
+    # 检查n是否为正整数
+    if not isinstance(n, int) or n <= 0:
+        raise ValueError(f"根次数n必须是正整数，当前n={n}")
+    # 转换为jax数组（兼容标量/数组输入）
+    x = jnp.asarray(x)
+    # 偶数根：检查x是否非负
+    if n % 2 == 0:
+        if jnp.any(x < 0):
+            raise ValueError(f"偶数根({n})的底数不能为负数，输入x包含负数：{x}")
+        return jnp.pow(x, 1.0 / n)
+    # 奇数根：处理负数底数（提取符号 + 绝对值开根 + 恢复符号）
+    else:
+        sign_x = jnp.sign(x)  # 提取符号（-1/0/1）
+        abs_x = jnp.abs(x)  # 取绝对值
+        root_abs = jnp.pow(abs_x, 1.0 / n)  # 绝对值开n次方
+        return sign_x * root_abs
