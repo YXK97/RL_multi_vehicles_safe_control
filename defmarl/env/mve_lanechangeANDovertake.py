@@ -74,7 +74,7 @@ class MVELaneChangeAndOverTake(MVE):
     def __init__(self,
                  num_agents: int,
                  area_size: Optional[float] = None,
-                 max_step: int = 512,
+                 max_step: int = 256,
                  max_travel: Optional[float] = None,
                  dt: float = 0.025,
                  params: dict = None
