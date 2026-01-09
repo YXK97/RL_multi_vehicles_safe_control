@@ -1,0 +1,10 @@
+# ========== Goal（请求部分）==========
+# 客户端向服务器请求多车控制量（无需传参，仅触发请求）
+# ========== Result（响应结果）==========
+# 服务器返回的多车控制量数组
+SingleAgentControl[] ad_action
+int32 action_dim # action_dim=2, 方便解析
+bool success    # 请求是否成功
+string message  # 响应日志（便于调试）
+# ========== Feedback（实时反馈）==========
+# 无需实时反馈，留空即可

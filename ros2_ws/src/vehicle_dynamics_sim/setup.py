@@ -13,6 +13,7 @@ setup(
          ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'msg'), glob('msg/*.msg')),
+        (os.path.join('share', package_name, 'action'), glob('action/*.action')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('lib', package_name), glob('scripts/*.py')),
     ],
