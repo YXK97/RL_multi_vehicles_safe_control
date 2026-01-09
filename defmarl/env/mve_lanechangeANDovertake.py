@@ -74,9 +74,9 @@ class MVELaneChangeAndOverTake(MVE):
     def __init__(self,
                  num_agents: int,
                  area_size: Optional[float] = None,
-                 max_step: int = 256,
+                 max_step: int = 128,
                  max_travel: Optional[float] = None,
-                 dt: float = 0.025,
+                 dt: float = 0.05,
                  params: dict = None
                  ):
         area_size = MVELaneChangeAndOverTake.PARAMS["rollout_state_range"][:4] if area_size is None else area_size
@@ -110,12 +110,10 @@ class MVELaneChangeAndOverTake(MVE):
     @property
     def reward_max(self):
         return 0.5
-        # return 500 # debug
 
     @property
     def reward_min(self) -> float:
-        return -17 # TODO: fine-tune
-        # return 300 # debug
+        return -10
 
     @override
     @property
@@ -319,21 +317,21 @@ class MVELaneChangeAndOverTake(MVE):
         # 循迹奖励： 位置+角度
         # 位置奖励，和目标点的欧氏距离
         a_dist = jnp.linalg.norm(a2_goal_pos_m - a2_agent_pos_m, axis=1)
-        reward -= a_dist.mean() * 0.01
+        reward -= a_dist.mean() * 0.02
 
         # 角度奖励
         a_costheta_dist = jnp.cos((a_goal_theta_deg - a_agent_theta_deg) * jnp.pi/180)
-        reward += (a_costheta_dist.mean() - 1) * 0.001
+        reward += (a_costheta_dist.mean() - 1) * 0.002
 
         # 速度跟踪惩罚
         a_delta_v = a2_goal_v_b_kmph[:, 0] - a2_agent_v_b_kmph[:, 0]
         # reward -= (a_delta_v**2).mean() * 0.00005 # 只比较x方向（纵向）速度
-        reward -= jnp.abs(a_delta_v).mean() * 0.0005
-        reward -= jnp.where(jnp.abs(a_delta_v) > self.params["v_bias"], 1., 0.).mean() * 0.005
+        reward -= jnp.abs(a_delta_v).mean() * 0.001
+        reward -= jnp.where(jnp.abs(a_delta_v) > self.params["v_bias"], 1., 0.).mean() * 0.01
 
         # 动作惩罚
-        reward -= (ad_action[:, 0]**2).mean() * 0.00005
-        reward -= (ad_action[:, 1]**2).mean() * 0.0001
+        reward -= (ad_action[:, 0]**2).mean() * 0.0001
+        reward -= (ad_action[:, 1]**2).mean() * 0.0002
 
         return reward
 
